@@ -1,0 +1,14 @@
+{
+  "appId": "com.freq.detector",
+  "appName": "HilozH",
+  "webDir": "public",
+  "bundledWebRuntime": false,
+  "server": {
+    "androidScheme": "https"
+  },
+  "plugins": {
+    "CapacitorHttp": {
+      "enabled": true
+    }
+  }
+}
