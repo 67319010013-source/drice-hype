@@ -852,7 +852,7 @@
       <p>กดปุ่ม <b>"🔄 สลับโหมด (A/B)"</b></p>
       <p>
         <span class="guide-mode-badge mode-a">MODE A</span>
-        รูปแบบสุ่ม 2 ชุดต่อกัน
+        รูปแบบการแจ้งเตือน 2 ชุดต่อกัน
       </p>
       <p>
         <span class="guide-mode-badge mode-b">MODE B</span>
@@ -868,10 +868,10 @@
       
       <h4 style="color:var(--amber);font-size:0.82rem;margin:12px 0 6px;">
         <span class="guide-mode-badge mode-a">MODE A</span>
-        สุ่ม 2 ชุดต่อกัน (ชุด A + ชุด B)
+        การแจ้งเตือน 2 ชุดต่อกัน (ชุด A + ชุด B)
       </h4>
       <p style="font-size:0.78rem;margin:6px 0;">
-        แต่ละชุดมี 6 รูปแบบ (สุ่ม):
+        แต่ละชุดมี 6 รูปแบบ :
       </p>
       
       <table class="vibe-table">
@@ -951,7 +951,7 @@
       </table>
 
       <p style="font-size:0.75rem;color:var(--muted);margin-top:10px;">
-        ⏱️ <b>ตัวอย่าง:</b> ถ้าสุ่มได้ "สั้น 3 ครั้ง" + "ยาว 1 ครั้ง"<br>
+        ⏱️ <b>ตัวอย่าง:</b> ถ้าแจ้งเตือนได้ "สั้น 3 ครั้ง" + "ยาว 1 ครั้ง"<br>
         → สั่นสั้น 3 ครั้ง → หยุดพัก 1 วิ → สั่นยาว 1 ครั้ง
       </p>
 
@@ -1131,14 +1131,15 @@ async function api(path, options = {}) {
                         || e.message.includes('Network request failed');
     
     if (isTimeout || isNetworkError) {
-      setOnlineStatus(false, isTimeout ? 'slow' : 'offline');
-      return { 
-        ok: false, 
-        code: 'NETWORK_ERROR',
-        networkError: true,
-        msg: isTimeout ? 'เซิร์ฟเวอร์ตอบช้า' : 'ไม่มีการเชื่อมต่ออินเทอร์เน็ต'
-      };
-    }
+  // ⭐ ไม่แยก timeout/slow — รวมเป็น offline
+  setOnlineStatus(false, 'offline');
+  return { 
+    ok: false, 
+    code: 'NETWORK_ERROR',
+    networkError: true,
+    msg: 'ไม่มีการเชื่อมต่ออินเทอร์เน็ต'
+  };
+}
     
     return { 
       ok: false, 
@@ -1278,10 +1279,12 @@ function beep(ms, freq, times) {
 function setOnlineStatus(isOk, mode = 'offline') {
   if (!els.netBanner) return;
   
+  // ⭐ ข้าม slow mode — แสดงเฉพาะ offline
+  if (!isOk && mode === 'slow') return;
+  
   if (isOk) {
-    // กลับมาออนไลน์
     networkOkCount = 0;
-    if (isOnline === true) return;  // ยัง online อยู่ ไม่ต้องทำอะไร
+    if (isOnline === true) return;
     
     isOnline = true;
     els.netBanner.className = 'net-banner online show';
@@ -1295,17 +1298,14 @@ function setOnlineStatus(isOk, mode = 'offline') {
     
     console.log('🌐 Online');
   } else {
-    // ออฟไลน์
-    if (isOnline === false && els.netBanner.classList.contains(mode)) return;
+    if (isOnline === false && els.netBanner.classList.contains('offline')) return;
     
     isOnline = false;
-    els.netBanner.className = 'net-banner ' + mode + ' show';
-    if (els.netIcon) els.netIcon.textContent = mode === 'slow' ? '🐢' : '📡';
-    els.netBannerText.textContent = mode === 'slow'
-      ? 'เซิร์ฟเวอร์ตอบช้า'
-      : 'ไม่มีสัญญาณอินเทอร์เน็ต';
+    els.netBanner.className = 'net-banner offline show';
+    if (els.netIcon) els.netIcon.textContent = '📡';
+    els.netBannerText.textContent = 'ไม่มีสัญญาณอินเทอร์เน็ต';
     
-    console.log('🌐 Offline - mode:', mode);
+    console.log('🌐 Offline');
   }
 }
 
@@ -1334,10 +1334,9 @@ if (els.netRetryBtn) {
 window.addEventListener('online', () => {
   console.log('🌐 Browser: online');
   networkOkCount = 0;
-  // ทดสอบ server จริง
   api('/api/health').then(r => {
     if (r.ok) setOnlineStatus(true);
-    else if (r.networkError) setOnlineStatus(false, 'slow');
+    else if (r.networkError) setOnlineStatus(false, 'offline');  // ⭐
   });
 });
 
@@ -1354,7 +1353,7 @@ function startNetHeartbeat() {
     if (!currentUser) return;
     const r = await api('/api/health');
     if (r.ok) setOnlineStatus(true);
-    else if (r.networkError) setOnlineStatus(false, 'slow');
+    else if (r.networkError) setOnlineStatus(false, 'offline');  // ⭐ เปลี่ยนเป็น offline
   }, 15000);
 }
 startNetHeartbeat();
