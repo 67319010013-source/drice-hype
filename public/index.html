@@ -321,6 +321,285 @@
     background: rgba(255,255,255,0.35);
   }
 
+    /* ============================================================
+     Side Guide Panel (คู่มือด้านขวา)
+  ============================================================ */
+  .side-toggle-btn {
+    position: fixed;
+    right: 0;
+    top: 40%;
+    transform: translateY(-50%);
+    z-index: 9998;
+    background: linear-gradient(135deg, var(--phosphor), var(--phosphor-dim));
+    color: #0a100e;
+    border: none;
+    padding: 14px 8px 14px 12px;
+    border-radius: 20px 0 0 20px;
+    font-family: 'Sarabun', sans-serif;
+    font-size: 0.72rem;
+    font-weight: 700;
+    cursor: pointer;
+    writing-mode: vertical-rl;
+    text-orientation: mixed;
+    letter-spacing: 1px;
+    box-shadow: -4px 0 12px rgba(77,255,174,0.35);
+    transition: all 0.2s;
+    display: flex;
+    align-items: center;
+    gap: 6px;
+  }
+  .side-toggle-btn:hover {
+    padding-right: 14px;
+    box-shadow: -6px 0 20px rgba(77,255,174,0.55);
+  }
+  .side-toggle-btn:active {
+    transform: translateY(-50%) scale(0.96);
+  }
+  .side-toggle-btn .toggle-icon {
+    font-size: 1rem;
+    writing-mode: horizontal-tb;
+  }
+
+  /* Overlay เมื่อเปิดแผง */
+  .side-overlay {
+    position: fixed;
+    inset: 0;
+    background: rgba(0,0,0,0.6);
+    z-index: 9998;
+    display: none;
+    backdrop-filter: blur(2px);
+  }
+  .side-overlay.show {
+    display: block;
+  }
+
+  /* Side Panel */
+  .side-panel {
+    position: fixed;
+    top: 0;
+    right: 0;
+    bottom: 0;
+    width: 90%;
+    max-width: 420px;
+    background: var(--panel);
+    border-left: 1px solid var(--phosphor-dim);
+    z-index: 9999;
+    transform: translateX(100%);
+    transition: transform 0.3s ease-out;
+    display: flex;
+    flex-direction: column;
+    box-shadow: -10px 0 40px rgba(0,0,0,0.7);
+  }
+  .side-panel.show {
+    transform: translateX(0);
+  }
+
+  .side-panel-header {
+    padding: 18px 20px;
+    padding-top: calc(18px + env(safe-area-inset-top));
+    border-bottom: 1px solid var(--line);
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    background: linear-gradient(180deg, rgba(77,255,174,0.08), transparent);
+  }
+  .side-panel-header h2 {
+    margin: 0;
+    font-size: 1.05rem;
+    color: var(--phosphor);
+    display: flex;
+    align-items: center;
+    gap: 8px;
+  }
+  .side-close-btn {
+    background: transparent;
+    border: 1px solid var(--line);
+    color: var(--muted);
+    width: 34px;
+    height: 34px;
+    border-radius: 50%;
+    font-size: 1.2rem;
+    cursor: pointer;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    transition: all 0.15s;
+  }
+  .side-close-btn:hover {
+    border-color: var(--alt);
+    color: var(--alt);
+  }
+
+  .side-panel-body {
+    flex: 1;
+    overflow-y: auto;
+    padding: 18px 20px;
+    padding-bottom: calc(18px + env(safe-area-inset-bottom));
+  }
+
+  /* Sections ในคู่มือ */
+  .guide-section {
+    margin-bottom: 22px;
+    padding: 14px 16px;
+    background: rgba(77,255,174,0.04);
+    border: 1px solid var(--line);
+    border-radius: 14px;
+  }
+  .guide-section h3 {
+    margin: 0 0 10px;
+    font-size: 0.92rem;
+    color: var(--phosphor);
+    display: flex;
+    align-items: center;
+    gap: 6px;
+    font-weight: 700;
+  }
+  .guide-section p {
+    margin: 0 0 8px;
+    font-size: 0.82rem;
+    color: var(--text);
+    line-height: 1.7;
+  }
+  .guide-section ol,
+  .guide-section ul {
+    margin: 8px 0 0;
+    padding-left: 22px;
+    font-size: 0.82rem;
+    color: var(--text);
+    line-height: 1.8;
+  }
+  .guide-section ol li,
+  .guide-section ul li {
+    margin-bottom: 6px;
+  }
+  .guide-section b {
+    color: var(--phosphor);
+  }
+  .guide-section .highlight {
+    background: rgba(255,154,74,0.15);
+    color: var(--amber);
+    padding: 2px 6px;
+    border-radius: 4px;
+    font-weight: 600;
+    font-size: 0.78rem;
+  }
+  .guide-section.amber {
+    background: rgba(255,154,74,0.05);
+    border-color: rgba(255,154,74,0.3);
+  }
+  .guide-section.amber h3 {
+    color: var(--amber);
+  }
+
+  /* ตารางรูปแบบการสั่น */
+  .vibe-table {
+    width: 100%;
+    border-collapse: collapse;
+    margin-top: 10px;
+    font-family: 'JetBrains Mono', monospace;
+    font-size: 0.72rem;
+  }
+  .vibe-table th,
+  .vibe-table td {
+    padding: 8px 6px;
+    text-align: left;
+    border-bottom: 1px solid var(--line);
+  }
+  .vibe-table th {
+    color: var(--muted);
+    font-size: 0.65rem;
+    text-transform: uppercase;
+    letter-spacing: 0.5px;
+    background: rgba(0,0,0,0.2);
+  }
+  .vibe-table td {
+    color: var(--text);
+  }
+  .vibe-table .vibe-pattern {
+    color: var(--amber);
+    font-weight: 700;
+  }
+  .vibe-table .vibe-desc {
+    color: var(--muted);
+    font-size: 0.68rem;
+  }
+
+  /* ตัวอธิบายการสั่นแบบเห็นภาพ */
+  .vibe-visual {
+    display: flex;
+    align-items: center;
+    gap: 4px;
+    flex-wrap: wrap;
+  }
+  .vibe-visual .v-on {
+    display: inline-block;
+    height: 10px;
+    width: 18px;
+    background: var(--amber);
+    border-radius: 3px;
+  }
+  .vibe-visual .v-off {
+    display: inline-block;
+    height: 10px;
+    width: 10px;
+    background: rgba(255,154,74,0.2);
+    border-radius: 3px;
+  }
+  .vibe-visual .v-long {
+    display: inline-block;
+    height: 10px;
+    width: 50px;
+    background: var(--alt);
+    border-radius: 3px;
+  }
+  .vibe-visual .v-gap {
+    display: inline-block;
+    height: 10px;
+    width: 20px;
+    background: transparent;
+    border-left: 1px dashed var(--muted);
+    margin: 0 4px;
+  }
+
+  /* Mode Badge ในคู่มือ */
+  .guide-mode-badge {
+    display: inline-block;
+    padding: 3px 10px;
+    border-radius: 20px;
+    font-size: 0.72rem;
+    font-weight: 700;
+    margin-right: 6px;
+  }
+  .guide-mode-badge.mode-a {
+    background: #1e3a8a;
+    color: #bfdbfe;
+  }
+  .guide-mode-badge.mode-b {
+    background: #5b21b6;
+    color: #ddd6fe;
+  }
+
+  /* Step numbers */
+  .step-num {
+    display: inline-flex;
+    align-items: center;
+    justify-content: center;
+    width: 22px;
+    height: 22px;
+    border-radius: 50%;
+    background: var(--phosphor-dim);
+    color: var(--phosphor);
+    font-size: 0.7rem;
+    font-weight: 700;
+    margin-right: 6px;
+    flex-shrink: 0;
+  }
+
+  /* ปุ่มเปิดคู่มือแบบเดี่ยว (สำหรับหน้า Program) */
+  .side-toggle-btn.program-guide {
+    top: 50%;
+  }
+
   /* Background mode indicator */
   .bg-indicator{
     display:none;
@@ -368,6 +647,72 @@
   <div class="overlay-box success">
     <h3>✅ ชำระเงินสำเร็จ!</h3>
     <p>ระบบตรวจพบการชำระเงินของคุณแล้ว<br>กำลังเข้าสู่หน้าใช้งาน…</p>
+  </div>
+</div>
+
+<!-- ============================================================
+     ปุ่มเปิดคู่มือ (หน้า Login)
+============================================================ -->
+<button class="side-toggle-btn" id="guideToggleLogin" style="display:none;">
+  <span class="toggle-icon">📖</span>
+  <span>คู่มือสมัคร</span>
+</button>
+
+<!-- Overlay -->
+<div class="side-overlay" id="guideOverlayLogin"></div>
+
+<!-- Side Panel: คู่มือสมัคร -->
+<div class="side-panel" id="guidePanelLogin">
+  <div class="side-panel-header">
+    <h2>📖 วิธีสมัครและใช้งานครั้งแรก</h2>
+    <button class="side-close-btn" data-close-guide="login">✕</button>
+  </div>
+  <div class="side-panel-body">
+    
+    <div class="guide-section">
+      <h3>🎯 ขั้นตอนที่ 1: สมัครสมาชิก</h3>
+      <p>เปิดแอป → แตะแท็บ <b>"✍️ สมัครสมาชิก"</b></p>
+      <ol>
+        <li>ตั้ง <b>ชื่อผู้ใช้</b> (a-z, A-Z, 0-9, _ เท่านั้น)</li>
+        <li>ตั้ง <b>รหัสผ่าน</b> อย่างน้อย 4 ตัวอักษร</li>
+        <li>ยืนยันรหัสผ่านอีกครั้ง</li>
+        <li>กดปุ่ม <b>"✍️ สมัครสมาชิก"</b></li>
+      </ol>
+    </div>
+
+    <div class="guide-section amber">
+      <h3>⏰ ขั้นตอนที่ 2: ชำระเงิน (ภายใน 10 นาที)</h3>
+      <p><span class="highlight">สำคัญ!</span> หลังสมัครต้องชำระเงินภายใน <b>10 นาที</b> มิฉะนั้นบัญชีจะถูกลบอัตโนมัติ</p>
+      <ol>
+        <li>สแกน <b>QR Code</b> ที่ปรากฏบนหน้าจอ</li>
+        <li>โอนเงินจำนวน <b>500 บาท</b></li>
+        <li>บันทึก <b>สลิปโอนเงิน</b> ไว้</li>
+        <li>กลับมาแอป → กด <b>"🖼 เลือกรูปสลิป"</b></li>
+        <li>เลือกรูปสลิป → กด <b>"✅ ยืนยันการชำระเงิน"</b></li>
+      </ol>
+    </div>
+
+    <div class="guide-section">
+      <h3>✅ ขั้นตอนที่ 3: เริ่มใช้งาน</h3>
+      <p>เมื่อระบบตรวจสอบสลิปสำเร็จ → <b>เข้าสู่หน้าใช้งานทันที</b></p>
+      <ul>
+        <li>ใช้งานได้ <b>24 ชั่วโมง</b> นับจากเวลาที่ชำระเงิน</li>
+        <li>เมื่อหมดเวลา → ต้องชำระเงินใหม่</li>
+        <li>กดปุ่ม <b>"▶ เริ่มฟัง"</b> เพื่อเปิดไมค์</li>
+      </ul>
+    </div>
+
+    <div class="guide-section amber">
+      <h3>⚠️ ข้อควรระวัง</h3>
+      <ul>
+        <li>สลิปต้องมี <b>QR Code</b> ชัดเจน</li>
+        <li>ยอดเงินต้องเป็น <b>500 บาท</b></li>
+        <li>สลิปต้องโอน<b>ภายใน 10 นาที</b> ล่าสุด</li>
+        <li>ห้ามใช้สลิปซ้ำ (ระบบตรวจจับได้)</li>
+        <li>ต้องมีอินเทอร์เน็ตตลอดการใช้งาน</li>
+      </ul>
+    </div>
+
   </div>
 </div>
 
@@ -471,6 +816,182 @@
       <button class="btn" id="slipUploadBtn" type="button" style="margin-top:10px;display:none;">✅ ยืนยันการชำระเงิน</button>
       <div id="slipUploadMsg" style="font-size:0.8rem;margin-top:8px;"></div>
     </div>
+  </div>
+</div>
+
+<!-- ============================================================
+     ปุ่มเปิดคู่มือ (หน้า Program)
+============================================================ -->
+<button class="side-toggle-btn program-guide" id="guideToggleProgram" style="display:none;">
+  <span class="toggle-icon">📖</span>
+  <span>คู่มือโหมด</span>
+</button>
+
+<!-- Overlay -->
+<div class="side-overlay" id="guideOverlayProgram"></div>
+
+<!-- Side Panel: คู่มือโหมดและรูปแบบการสั่น -->
+<div class="side-panel" id="guidePanelProgram">
+  <div class="side-panel-header">
+    <h2>📖 คู่มือโหมดและรูปแบบการสั่น</h2>
+    <button class="side-close-btn" data-close-guide="program">✕</button>
+  </div>
+  <div class="side-panel-body">
+
+    <div class="guide-section">
+      <h3>🎤 วิธีเริ่มใช้งาน</h3>
+      <ol>
+        <li>กดปุ่ม <b>"▶ เริ่มฟัง"</b></li>
+        <li>อนุญาตการเข้าถึง<b>ไมโครโฟน</b></li>
+        <li>แนบมือถือไว้ใกล้<b>แหล่งเสียง</b></li>
+        <li>เมื่อตรวจพบเสียงเป้าหมาย → <b>สั่น</b>ตามรูปแบบ</li>
+      </ol>
+    </div>
+
+    <div class="guide-section">
+      <h3>🔄 วิธีสลับโหมด</h3>
+      <p>กดปุ่ม <b>"🔄 สลับโหมด (A/B)"</b></p>
+      <p>
+        <span class="guide-mode-badge mode-a">MODE A</span>
+        รูปแบบการแจ้งเตือน 2 ชุดต่อกัน
+      </p>
+      <p>
+        <span class="guide-mode-badge mode-b">MODE B</span>
+        สั่นยาว 1 ครั้ง
+      </p>
+      <p style="font-size:0.75rem;color:var(--muted);margin-top:8px;">
+        ⚠️ ไม่สามารถสลับโหมดได้ขณะกำลังสั่น
+      </p>
+    </div>
+
+    <div class="guide-section amber">
+      <h3>📳 รูปแบบการสั่น</h3>
+      
+      <h4 style="color:var(--amber);font-size:0.82rem;margin:12px 0 6px;">
+        <span class="guide-mode-badge mode-a">MODE A</span>
+        การแจ้งเตือน 2 ชุดต่อกัน (ชุด A + ชุด B)
+      </h4>
+      <p style="font-size:0.78rem;margin:6px 0;">
+        แต่ละชุดมี 6 รูปแบบ :
+      </p>
+      
+      <table class="vibe-table">
+        <thead>
+          <tr>
+            <th>#</th>
+            <th>รูปแบบ</th>
+            <th>ตัวอย่าง</th>
+          </tr>
+        </thead>
+        <tbody>
+          <tr>
+            <td>1</td>
+            <td class="vibe-pattern">สั้น 1 ครั้ง</td>
+            <td>
+              <div class="vibe-visual">
+                <span class="v-on"></span>
+              </div>
+            </td>
+          </tr>
+          <tr>
+            <td>2</td>
+            <td class="vibe-pattern">สั้น 2 ครั้ง</td>
+            <td>
+              <div class="vibe-visual">
+                <span class="v-on"></span><span class="v-off"></span>
+                <span class="v-on"></span>
+              </div>
+            </td>
+          </tr>
+          <tr>
+            <td>3</td>
+            <td class="vibe-pattern">สั้น 3 ครั้ง</td>
+            <td>
+              <div class="vibe-visual">
+                <span class="v-on"></span><span class="v-off"></span>
+                <span class="v-on"></span><span class="v-off"></span>
+                <span class="v-on"></span>
+              </div>
+            </td>
+          </tr>
+          <tr>
+            <td>4</td>
+            <td class="vibe-pattern">สั้น 4 ครั้ง</td>
+            <td>
+              <div class="vibe-visual">
+                <span class="v-on"></span><span class="v-off"></span>
+                <span class="v-on"></span><span class="v-off"></span>
+                <span class="v-on"></span><span class="v-off"></span>
+                <span class="v-on"></span>
+              </div>
+            </td>
+          </tr>
+          <tr>
+            <td>5</td>
+            <td class="vibe-pattern">สั้น 5 ครั้ง</td>
+            <td>
+              <div class="vibe-visual">
+                <span class="v-on"></span><span class="v-off"></span>
+                <span class="v-on"></span><span class="v-off"></span>
+                <span class="v-on"></span><span class="v-off"></span>
+                <span class="v-on"></span><span class="v-off"></span>
+                <span class="v-on"></span>
+              </div>
+            </td>
+          </tr>
+          <tr>
+            <td>6</td>
+            <td class="vibe-pattern">ยาว 1 ครั้ง</td>
+            <td>
+              <div class="vibe-visual">
+                <span class="v-long"></span>
+              </div>
+            </td>
+          </tr>
+        </tbody>
+      </table>
+
+      <p style="font-size:0.75rem;color:var(--muted);margin-top:10px;">
+        ⏱️ <b>ตัวอย่าง:</b> ถ้าแจ้งเตือนได้ "สั้น 3 ครั้ง" + "ยาว 1 ครั้ง"<br>
+        → สั่นสั้น 3 ครั้ง → หยุดพัก 1 วิ → สั่นยาว 1 ครั้ง
+      </p>
+
+      <h4 style="color:var(--amber);font-size:0.82rem;margin:16px 0 6px;">
+        <span class="guide-mode-badge mode-b">MODE B</span>
+        สั่นยาว 1 ครั้ง
+      </h4>
+      <div class="vibe-visual" style="margin:6px 0;">
+        <span class="v-long"></span>
+      </div>
+      <p style="font-size:0.78rem;color:var(--muted);margin-top:4px;">
+        เมื่อตรวจพบเสียงเป้าหมาย → สั่นยาวต่อเนื่อง 1 วินาที
+      </p>
+    </div>
+
+    <div class="guide-section">
+      <h3>🔒 การทำงานเบื้องหลัง</h3>
+      <p>แอปสามารถทำงานต่อได้แม้:</p>
+      <ul>
+        <li>✅ พับหน้าจอ / ปิดจอ</li>
+        <li>✅ สลับไปแอปอื่น</li>
+        <li>✅ กดปุ่ม Home</li>
+      </ul>
+      <p style="font-size:0.75rem;color:var(--muted);">
+        ⚠️ ต้องเปิด <b>"ไม่จำกัดแบตเตอรี่"</b> ให้แอป<br>
+        Settings → Apps → HliozH → Battery → Unrestricted
+      </p>
+    </div>
+
+    <div class="guide-section amber">
+      <h3>⚠️ การแก้ไขปัญหา</h3>
+      <ul>
+        <li><b>ไมค์ไม่ทำงาน</b> → Settings → Apps → HliozH → Permissions → Microphone = Allow</li>
+        <li><b>ไม่สั่น</b> → Settings → Sound → Vibration = ON</li>
+        <li><b>แอปหยุดทำงาน</b> → เปิด Battery Unrestricted</li>
+        <li><b>การสั่นสั้นเกินไป</b> → เป็นเรื่องปกติของโหมด A (มี 6 รูปแบบ)</li>
+      </ul>
+    </div>
+
   </div>
 </div>
 
