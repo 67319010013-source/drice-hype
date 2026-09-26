@@ -148,9 +148,28 @@ function requireAdmin(req, res, next) {
 // ============================================================
 app.get('/api/health', (req, res) => res.json({ ok: true }));
 
-app.get('/api/me', requireLogin, async (req, res) => {
+app.get('/api/me', async (req, res) => {
+  // ถ้าไม่มี session → return 401 ชัดเจน
+  if (!req.session.user) {
+    return res.status(401).json({ 
+      ok: false, 
+      code: 'NO_SESSION',
+      msg: 'กรุณาเข้าสู่ระบบ' 
+    });
+  }
+
   const u = await dbGet('SELECT * FROM users WHERE username=?', [req.session.user.username]);
-  if (!u) { req.session.destroy(()=>{}); return res.json({ ok: false, msg: 'บัญชีถูกลบ' }); }
+  
+  if (!u) {
+    // บัญชีถูกลบจริง
+    req.session.destroy(() => {});
+    return res.status(404).json({ 
+      ok: false, 
+      code: 'USER_DELETED',
+      msg: 'บัญชีถูกลบ' 
+    });
+  }
+  // ...
 
   const now = Date.now();
   let status = u.status;
@@ -162,8 +181,11 @@ app.get('/api/me', requireLogin, async (req, res) => {
   res.json({
     ok: true,
     user: {
-      username: u.username, role: u.role, status,
-      expiresAt: u.expires_at, remainingMs: (u.expires_at && u.expires_at > now) ? u.expires_at - now : 0
+      username: u.username,
+      role: u.role,
+      status,
+      expiresAt: u.expires_at,
+      remainingMs: (u.expires_at && u.expires_at > now) ? u.expires_at - now : 0
     }
   });
 });
