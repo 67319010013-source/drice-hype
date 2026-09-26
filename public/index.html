@@ -282,8 +282,8 @@
 <!-- Overlay: บัญชีถูกลบ -->
 <div class="overlay" id="kickOverlay">
   <div class="overlay-box">
-    <h3>⚠️ บัญชีของคุณถูกลบ</h3>
-    <p>แอดมินได้ลบบัญชีนี้แล้ว<br>คุณจะไม่สามารถใช้งานได้</p>
+    <h3>🚫📶 เครือข่ายไม่เสถียร</h3>
+    <p>กรุณาเช็คอินเตอร์เน็ต<br>เพื่อใช้งานแอป</p>
     <button class="btn" id="kickOkBtn">ตกลง</button>
   </div>
 </div>
@@ -399,7 +399,7 @@
       📤 โอนเงินแล้ว? แนบรูป <b>สลิปโอนเงิน</b> เพื่อให้ระบบตรวจสอบอัตโนมัติทันที
     </div>
     <div style="text-align:center;margin-top:10px;">
-      <input type="file" id="slipFileInput" accept="image/*" style="display:none;">
+      <input type="file" id="slipFileInput" accept="image/*" capture="environment" style="display:none;">
       <button class="btn ghost" id="slipPickBtn" type="button">🖼 เลือกรูปสลิป</button>
       <span id="slipFileName" style="display:block;font-size:0.75rem;color:var(--dim);margin-top:6px;"></span>
       <button class="btn" id="slipUploadBtn" type="button" style="margin-top:10px;display:none;">✅ ยืนยันการชำระเงิน</button>
@@ -658,10 +658,29 @@ async function handleLogin() {
   els.loginBtn.textContent = '🔓 เข้าสู่ระบบ';
 
   if (res.ok) {
-    currentUser = res.user;
     beep(200, 1046, 2);
-    routeByUserStatus();
-    startSessionWatch();
+
+    // ⭐ ใช้ user ที่ server ส่งกลับ (ถ้ามี)
+    if (res.user) {
+      currentUser = res.user;
+      routeByUserStatus();
+      startSessionWatch();
+      return;
+    }
+
+    // ⭐ Fallback: ถ้า server ไม่ส่ง user → ดึง /api/me
+    console.log('⚠️ ไม่มี res.user → ดึง /api/me');
+    const me = await api('/api/me');
+    if (me.ok && me.user) {
+      currentUser = me.user;
+      routeByUserStatus();
+      startSessionWatch();
+      return;
+    }
+
+    // ถ้ายังไม่ได้ → แจ้ง error
+    alert('❌ ไม่สามารถดึงข้อมูลผู้ใช้ได้ กรุณาลองใหม่');
+    currentUser = null;
   } else {
     beep(300, 340, 1);
     els.loginPass.value = '';
@@ -692,10 +711,25 @@ async function handleRegister() {
   els.registerBtn.textContent = '✍️ สมัครสมาชิก';
 
   if (res.ok) {
-    currentUser = res.user;
     beep(200, 1046, 2);
-    goToPayment();
-    startSessionWatch();
+
+    if (res.user) {
+      currentUser = res.user;
+      goToPayment();
+      startSessionWatch();
+      return;
+    }
+
+    // Fallback
+    const me = await api('/api/me');
+    if (me.ok && me.user) {
+      currentUser = me.user;
+      goToPayment();
+      startSessionWatch();
+      return;
+    }
+
+    alert('❌ ไม่สามารถดึงข้อมูลผู้ใช้ได้');
   } else {
     beep(300, 340, 1);
     alert('❌ ' + (res.msg || 'สมัครไม่สำเร็จ'));
