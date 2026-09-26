@@ -275,15 +275,80 @@
     width:8px;height:8px;border-radius:50%;background:var(--phosphor);
     animation:pulse 1.5s infinite;
   }
+    /* ============================================================
+     Network Status Banner
+  ============================================================ */
+  .net-banner {
+    position: fixed;
+    top: 0;
+    left: 0;
+    right: 0;
+    padding: 10px 16px;
+    z-index: 99999;
+    font-family: 'Sarabun', sans-serif;
+    font-size: 0.85rem;
+    font-weight: 600;
+    display: none;
+    align-items: center;
+    justify-content: center;
+    gap: 8px;
+    transform: translateY(-100%);
+    transition: transform 0.3s ease-out;
+    padding-top: calc(10px + env(safe-area-inset-top));
+  }
+  .net-banner.show {
+    display: flex;
+    transform: translateY(0);
+  }
+  .net-banner.offline {
+    background: linear-gradient(180deg, #b91c1c, #7f1d1d);
+    color: #fff;
+    box-shadow: 0 4px 20px rgba(185, 28, 28, 0.5);
+  }
+  .net-banner.slow {
+    background: linear-gradient(180deg, #d97706, #92400e);
+    color: #fff;
+    box-shadow: 0 4px 20px rgba(217, 119, 6, 0.5);
+  }
+  .net-banner.online {
+    background: linear-gradient(180deg, #059669, #047857);
+    color: #fff;
+    box-shadow: 0 4px 20px rgba(5, 150, 105, 0.5);
+  }
+  .net-banner .net-icon {
+    font-size: 1.1rem;
+    animation: pulse 1.2s infinite;
+  }
+  .net-banner .net-retry {
+    background: rgba(255,255,255,0.2);
+    border: 1px solid rgba(255,255,255,0.4);
+    color: #fff;
+    border-radius: 20px;
+    padding: 3px 12px;
+    font-size: 0.75rem;
+    font-family: 'Sarabun', sans-serif;
+    cursor: pointer;
+    margin-left: 8px;
+  }
+  .net-banner .net-retry:active {
+    background: rgba(255,255,255,0.35);
+  }
 </style>
 </head>
 <body>
 
+<!-- ⭐ Network Status Banner -->
+<div class="net-banner" id="netBanner">
+  <span class="net-icon" id="netIcon">📡</span>
+  <span id="netBannerText">ไม่มีสัญญาณอินเทอร์เน็ต</span>
+  <button class="net-retry" id="netRetryBtn">ลองใหม่</button>
+</div>
+
 <!-- Overlay: บัญชีถูกลบ -->
 <div class="overlay" id="kickOverlay">
   <div class="overlay-box">
-    <h3>🚫📶 เครือข่ายไม่เสถียร</h3>
-    <p>กรุณาเช็คอินเตอร์เน็ต<br>เพื่อใช้งานแอป</p>
+    <h3>⚠️ บัญชีของคุณถูกลบ</h3>
+    <p>แอดมินได้ลบบัญชีนี้แล้ว<br>คุณจะไม่สามารถใช้งานได้</p>
     <button class="btn" id="kickOkBtn">ตกลง</button>
   </div>
 </div>
@@ -506,11 +571,59 @@ async function api(path, options = {}) {
     headers: { 'Content-Type': 'application/json' },
     ...options
   };
+  
+  // ⭐ Timeout 15 วินาที
+  const controller = new AbortController();
+  const timeoutId = setTimeout(() => controller.abort(), 15000);
+  opts.signal = controller.signal;
+  
   try {
     const r = await fetch(API_BASE + path, opts);
+    clearTimeout(timeoutId);
+    
+    if (!r.ok) {
+      // Server error (401, 403, 404, 500, ...)
+      const data = await r.json().catch(() => ({}));
+      return { 
+        ok: false, 
+        status: r.status,
+        code: data.code || null,
+        msg: data.msg || `HTTP ${r.status}`
+      };
+    }
+    
+    // สำเร็จ → reset network state
+    networkOkCount++;
+    if (networkOkCount >= 2) {
+      setOnlineStatus(true);
+    }
+    
     return await r.json().catch(() => ({ ok: false, msg: 'ตอบกลับไม่ใช่ JSON' }));
+    
   } catch (e) {
-    return { ok: false, msg: 'เชื่อมต่อเซิร์ฟเวอร์ไม่ได้: ' + e.message };
+    clearTimeout(timeoutId);
+    
+    // ⭐ แยกแยะ error
+    const isTimeout = e.name === 'AbortError';
+    const isNetworkError = e.message.includes('Failed to fetch') 
+                        || e.message.includes('NetworkError')
+                        || e.message.includes('Network request failed');
+    
+    if (isTimeout || isNetworkError) {
+      setOnlineStatus(false, isTimeout ? 'slow' : 'offline');
+      return { 
+        ok: false, 
+        code: 'NETWORK_ERROR',
+        networkError: true,
+        msg: isTimeout ? 'เซิร์ฟเวอร์ตอบช้า' : 'ไม่มีการเชื่อมต่ออินเทอร์เน็ต'
+      };
+    }
+    
+    return { 
+      ok: false, 
+      code: 'UNKNOWN_ERROR',
+      msg: 'เชื่อมต่อเซิร์ฟเวอร์ไม่ได้: ' + e.message 
+    };
   }
 }
 
@@ -548,7 +661,13 @@ const els = {
   kickOverlay: $('kickOverlay'), kickOkBtn: $('kickOkBtn'),
   expiredOverlay: $('expiredOverlay'), renewBtn: $('renewBtn'),
   paidOverlay: $('paidOverlay'),
-  bgIndicator: $('bgIndicator'), bgIndicatorText: $('bgIndicatorText')
+    bgIndicator: $('bgIndicator'), bgIndicatorText: $('bgIndicatorText'),
+  
+  // ⭐ Network
+  netBanner: $('netBanner'),
+  netBannerText: $('netBannerText'),
+  netIcon: $('netIcon'),
+  netRetryBtn: $('netRetryBtn')
 };
 
 let currentUser = null;
@@ -562,6 +681,12 @@ let adminLastFetch = 0;
 
 let paymentRef = null;
 let paymentPollTimer = null;
+
+// ⭐ Network state
+let isOnline = navigator.onLine;
+let networkBannerTimer = null;
+let networkOkCount = 0;
+let netHeartbeatTimer = null;
 
 /* ============================================================
    VIEW
@@ -622,6 +747,93 @@ function beep(ms, freq, times) {
 }
 
 /* ============================================================
+   NETWORK STATUS BANNER
+============================================================ */
+function setOnlineStatus(isOk, mode = 'offline') {
+  if (!els.netBanner) return;
+  
+  if (isOk) {
+    // กลับมาออนไลน์
+    networkOkCount = 0;
+    if (isOnline === true) return;  // ยัง online อยู่ ไม่ต้องทำอะไร
+    
+    isOnline = true;
+    els.netBanner.className = 'net-banner online show';
+    if (els.netIcon) els.netIcon.textContent = '✅';
+    els.netBannerText.textContent = 'เชื่อมต่อแล้ว';
+    
+    clearTimeout(networkBannerTimer);
+    networkBannerTimer = setTimeout(() => {
+      els.netBanner.classList.remove('show');
+    }, 2000);
+    
+    console.log('🌐 Online');
+  } else {
+    // ออฟไลน์
+    if (isOnline === false && els.netBanner.classList.contains(mode)) return;
+    
+    isOnline = false;
+    els.netBanner.className = 'net-banner ' + mode + ' show';
+    if (els.netIcon) els.netIcon.textContent = mode === 'slow' ? '🐢' : '📡';
+    els.netBannerText.textContent = mode === 'slow'
+      ? 'เซิร์ฟเวอร์ตอบช้า'
+      : 'ไม่มีสัญญาณอินเทอร์เน็ต';
+    
+    console.log('🌐 Offline - mode:', mode);
+  }
+}
+
+// ปุ่ม retry
+if (els.netRetryBtn) {
+  els.netRetryBtn.addEventListener('click', async () => {
+    els.netBannerText.textContent = '⏳ กำลังตรวจสอบ...';
+    const r = await api('/api/health');
+    if (r.ok) {
+      setOnlineStatus(true);
+      // Refresh ปัจจุบัน
+      if (currentUser) {
+        const me = await api('/api/me');
+        if (me.ok) {
+          currentUser = me.user;
+          routeByUserStatus();
+        }
+      }
+    } else if (r.networkError) {
+      setOnlineStatus(false, r.msg?.includes('ช้า') ? 'slow' : 'offline');
+    }
+  });
+}
+
+// ⭐ Browser events
+window.addEventListener('online', () => {
+  console.log('🌐 Browser: online');
+  networkOkCount = 0;
+  // ทดสอบ server จริง
+  api('/api/health').then(r => {
+    if (r.ok) setOnlineStatus(true);
+    else if (r.networkError) setOnlineStatus(false, 'slow');
+  });
+});
+
+window.addEventListener('offline', () => {
+  console.log('🌐 Browser: offline');
+  networkOkCount = 0;
+  setOnlineStatus(false, 'offline');
+});
+
+// ⭐ Heartbeat ทุก 15 วิ (ตรวจ server จริง)
+function startNetHeartbeat() {
+  if (netHeartbeatTimer) return;
+  netHeartbeatTimer = setInterval(async () => {
+    if (!currentUser) return;
+    const r = await api('/api/health');
+    if (r.ok) setOnlineStatus(true);
+    else if (r.networkError) setOnlineStatus(false, 'slow');
+  }, 15000);
+}
+startNetHeartbeat();
+
+/* ============================================================
    TABS
 ============================================================ */
 els.tabLogin.addEventListener('click', () => {
@@ -657,10 +869,16 @@ async function handleLogin() {
   els.loginBtn.disabled = false;
   els.loginBtn.textContent = '🔓 เข้าสู่ระบบ';
 
+  // ⭐ เน็ตขาด
+  if (res.networkError) {
+    beep(300, 340, 1);
+    alert('📡 ไม่สามารถเชื่อมต่อได้\n' + (res.msg || 'กรุณาตรวจสอบอินเทอร์เน็ต'));
+    return;
+  }
+
   if (res.ok) {
     beep(200, 1046, 2);
 
-    // ⭐ ใช้ user ที่ server ส่งกลับ (ถ้ามี)
     if (res.user) {
       currentUser = res.user;
       routeByUserStatus();
@@ -668,7 +886,7 @@ async function handleLogin() {
       return;
     }
 
-    // ⭐ Fallback: ถ้า server ไม่ส่ง user → ดึง /api/me
+    // Fallback
     console.log('⚠️ ไม่มี res.user → ดึง /api/me');
     const me = await api('/api/me');
     if (me.ok && me.user) {
@@ -678,7 +896,6 @@ async function handleLogin() {
       return;
     }
 
-    // ถ้ายังไม่ได้ → แจ้ง error
     alert('❌ ไม่สามารถดึงข้อมูลผู้ใช้ได้ กรุณาลองใหม่');
     currentUser = null;
   } else {
@@ -710,6 +927,13 @@ async function handleRegister() {
   els.registerBtn.disabled = false;
   els.registerBtn.textContent = '✍️ สมัครสมาชิก';
 
+  // ⭐ เน็ตขาด
+  if (res.networkError) {
+    beep(300, 340, 1);
+    alert('📡 ไม่สามารถเชื่อมต่อได้');
+    return;
+  }
+
   if (res.ok) {
     beep(200, 1046, 2);
 
@@ -720,7 +944,6 @@ async function handleRegister() {
       return;
     }
 
-    // Fallback
     const me = await api('/api/me');
     if (me.ok && me.user) {
       currentUser = me.user;
@@ -806,17 +1029,48 @@ function startSessionWatch() {
   stopSessionWatch();
   sessionTimer = setInterval(async () => {
     if (!currentUser || isKicked) return;
+
     const res = await api('/api/me');
+
     if (!res.ok) {
-      isKicked = true;
-      stopSessionWatch();
-      try { stopListening(); } catch (e) {}
-      releaseWakeLock();
-      stopPaymentPolling();
-      if (navigator.vibrate) navigator.vibrate([300, 100, 300]);
-      els.kickOverlay.classList.add('show');
+      // ⭐ 1. เน็ตขาด / server ล่ม → ไม่เด้ง แค่แจ้งเตือน
+      if (res.networkError || res.code === 'NETWORK_ERROR') {
+        console.log('🌐 เน็ตขาด → ข้ามรอบนี้');
+        return;
+      }
+
+      // ⭐ 2. Session หมดอายุ → กลับไป login
+      if (res.status === 401 || res.code === 'NO_SESSION') {
+        console.log('⏰ Session หมดอายุ → กลับไป login');
+        stopSessionWatch();
+        try { stopListening(); } catch (e) {}
+        releaseWakeLock();
+        stopPaymentPolling();
+        currentUser = null;
+        showView('login');
+        beep(300, 340, 1);
+        alert('⏰ Session หมดอายุ กรุณาเข้าสู่ระบบใหม่');
+        return;
+      }
+
+      // ⭐ 3. บัญชีถูกลบจริง (404 / USER_DELETED)
+      if (res.status === 404 || res.code === 'USER_DELETED') {
+        console.log('❌ บัญชีถูกลบ');
+        isKicked = true;
+        stopSessionWatch();
+        try { stopListening(); } catch (e) {}
+        releaseWakeLock();
+        stopPaymentPolling();
+        if (navigator.vibrate) navigator.vibrate([300, 100, 300]);
+        els.kickOverlay.classList.add('show');
+        return;
+      }
+
+      // เคสอื่นๆ → ข้าม
+      console.log('⚠️ /api/me error:', res.msg);
       return;
     }
+
     currentUser = res.user;
 
     if (currentUser.role !== 'admin' && currentUser.status !== 'paid') {
@@ -857,8 +1111,15 @@ function loadQR() {
 }
 
 async function startPaymentSession() {
-  // ⭐ เช็ค session ก่อนเป็นอันดับแรก
+  // ⭐ เช็ค session ก่อน
   const me = await api('/api/me');
+  
+  // ถ้าเน็ตขาด → return
+  if (!me.ok && me.networkError) {
+    console.log('🌐 เน็ตขาด → ข้ามการสร้าง payment');
+    return;
+  }
+  
   if (me.ok && me.user) {
     currentUser = me.user;
     if (currentUser.role === 'admin' || currentUser.status === 'paid') {
@@ -870,6 +1131,11 @@ async function startPaymentSession() {
 
   const r = await api('/api/create-payment', { method: 'POST' });
   if (!r.ok) {
+    if (r.networkError) {
+      els.payStatusBadge.textContent = '📡 รอการเชื่อมต่อ…';
+      els.payStatusBadge.className = 'status-badge status-pending';
+      return;
+    }
     els.payStatusBadge.textContent = '❌ สร้างรายการไม่สำเร็จ';
     els.payStatusBadge.className = 'status-badge status-expired';
     return;
@@ -883,7 +1149,7 @@ async function startPaymentSession() {
   els.pollingIndicator.style.display = 'flex';
   els.pollingText.textContent = 'กำลังรอการยืนยันจากระบบ…';
 
-  // เพิ่มโค้ด 5 บรรทัดนี้
+  // Reset slip UI
   selectedSlipFile = null;
   if (els.slipFileInput) els.slipFileInput.value = '';
   if (els.slipFileName) els.slipFileName.textContent = '';
@@ -891,9 +1157,10 @@ async function startPaymentSession() {
   if (els.slipUploadMsg) els.slipUploadMsg.textContent = '';
 
   stopPaymentPolling();
-
-  
+  paymentPollTimer = setInterval(checkPayment, POLL_INTERVAL_MS);
+  checkPayment();
 }
+
 let selectedSlipFile = null;
 
 els.slipPickBtn?.addEventListener('click', () => els.slipFileInput.click());
@@ -943,7 +1210,7 @@ els.slipUploadBtn?.addEventListener('click', async () => {
     }
   } catch (e) {
     els.slipUploadMsg.style.color = '#ff6b6b';
-    els.slipUploadMsg.textContent = '❌ เชื่อมต่อเซิร์ฟเวอร์ไม่ได้';
+    els.slipUploadMsg.textContent = '📡 เชื่อมต่อเซิร์ฟเวอร์ไม่ได้ กรุณาลองใหม่';
     els.slipUploadBtn.disabled = false;
   }
 });
@@ -951,12 +1218,18 @@ els.slipUploadBtn?.addEventListener('click', async () => {
 async function checkPayment() {
   if (!currentUser) return;
 
-  // ⭐ 1. เช็คสถานะ user ก่อน (admin อาจอนุมัติโดยตรง)
+  // ⭐ 1. เช็คสถานะ user ก่อน
   const me = await api('/api/me');
+  
+  // ถ้าเน็ตขาด → แค่ log ไม่ต้องทำอะไร
+  if (!me.ok && me.networkError) {
+    console.log('🌐 เน็ตขาด → ข้ามการเช็ค');
+    return;
+  }
+  
   if (me.ok && me.user) {
     currentUser = me.user;
     
-    // ถ้า user ถูกอนุมัติแล้ว → เด้งเข้า program ทันที
     if (currentUser.role === 'admin' || currentUser.status === 'paid') {
       console.log('✅ User ถูกอนุมัติแล้ว → เข้าหน้า Program');
       stopPaymentPolling();
@@ -980,18 +1253,23 @@ async function checkPayment() {
     }
   }
 
-  // ⭐ 2. เช็ค payment intent (เดิม)
+  // ⭐ 2. เช็ค payment intent
   if (!paymentRef) return;
   
   const r = await api('/api/check-payment?ref=' + encodeURIComponent(paymentRef));
-  if (!r.ok) return;
+  if (!r.ok) {
+    if (r.networkError) return;  // เน็ตขาด → ข้าม
+    return;
+  }
 
   if (r.paid) {
     stopPaymentPolling();
     els.payStatusBadge.textContent = '✅ ชำระเงินแล้ว';
     els.payStatusBadge.className = 'status-badge status-paid';
     els.pollingText.textContent = '✅ ตรวจพบการชำระเงิน!';
-    els.pollingIndicator.querySelector('.spinner').style.display = 'none';
+    
+    const spinner = els.pollingIndicator.querySelector('.spinner');
+    if (spinner) spinner.style.display = 'none';
 
     if (navigator.vibrate) navigator.vibrate([100, 50, 100]);
     beep(150, 1046, 2);
@@ -1468,19 +1746,25 @@ async function boot() {
     }
   }
 
+  // Debug plugins
+  if (window.Capacitor && window.Capacitor.Plugins) {
+    console.log('📋 Plugins:', Object.keys(window.Capacitor.Plugins));
+  }
+
   // ตรวจสอบการเชื่อมต่อ
   const health = await api('/api/health');
+  
   if (health.ok) {
     els.connStatus.textContent = '✅ เชื่อมต่อเซิร์ฟเวอร์สำเร็จ';
     els.connStatus.className = 'conn-status ok';
-  } else {
-    els.connStatus.textContent = '❌ ไม่สามารถเชื่อมต่อได้';
+    setOnlineStatus(true);
+  } else if (health.networkError) {
+    els.connStatus.textContent = '📡 ไม่สามารถเชื่อมต่อได้';
     els.connStatus.className = 'conn-status err';
-  }
-
-  // Debug: แสดง plugin ที่มี
-  if (window.Capacitor && window.Capacitor.Plugins) {
-    console.log('📋 Plugins:', Object.keys(window.Capacitor.Plugins));
+    setOnlineStatus(false, 'offline');
+  } else {
+    els.connStatus.textContent = '❌ เชื่อมต่อ backend ไม่ได้';
+    els.connStatus.className = 'conn-status err';
   }
 
   // ตรวจสอบ session
@@ -1490,6 +1774,11 @@ async function boot() {
     routeByUserStatus();
     startSessionWatch();
     return;
+  }
+
+  // ถ้าเน็ตขาด → ยังคงแสดงหน้า Login
+  if (me.networkError) {
+    console.log('🌐 เน็ตขาดตอน boot → แสดงหน้า Login');
   }
   showView('login');
 }
