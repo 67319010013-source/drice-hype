@@ -25,8 +25,7 @@ const ADMIN_DEFAULT_USER = 'admin';
 const ADMIN_DEFAULT_PASS = '0647748563';
 
 const EXPECTED_ACCOUNT_LAST4 = process.env.RECEIVER_ACCOUNT_LAST4 || '';
-const expectedNameTH = process.env.RECEIVER_NAME ? process.env.RECEIVER_NAME.replace(/\s+/g, '') : '';
-const expectedNameEN = process.env.RECEIVER_NAME_ENG ? process.env.RECEIVER_NAME_ENG.replace(/\s+/g, '').toUpperCase() : '';
+const EXPECTED_NAME = process.env.RECEIVER_NAME || '';
 
 // ตั้งค่ารับไฟล์รูปภาพ (เก็บไว้ใน Memory ชั่วคราวก่อนเพื่อรอตรวจสอบ)
 const upload = multer({
@@ -148,28 +147,9 @@ function requireAdmin(req, res, next) {
 // ============================================================
 app.get('/api/health', (req, res) => res.json({ ok: true }));
 
-app.get('/api/me', async (req, res) => {
-  // ถ้าไม่มี session → return 401 ชัดเจน
-  if (!req.session.user) {
-    return res.status(401).json({ 
-      ok: false, 
-      code: 'NO_SESSION',
-      msg: 'กรุณาเข้าสู่ระบบ' 
-    });
-  }
-
+app.get('/api/me', requireLogin, async (req, res) => {
   const u = await dbGet('SELECT * FROM users WHERE username=?', [req.session.user.username]);
-  
-  if (!u) {
-    // บัญชีถูกลบจริง
-    req.session.destroy(() => {});
-    return res.status(404).json({ 
-      ok: false, 
-      code: 'USER_DELETED',
-      msg: 'บัญชีถูกลบ' 
-    });
-  }
-  // ...
+  if (!u) { req.session.destroy(()=>{}); return res.json({ ok: false, msg: 'บัญชีถูกลบ' }); }
 
   const now = Date.now();
   let status = u.status;
@@ -181,11 +161,8 @@ app.get('/api/me', async (req, res) => {
   res.json({
     ok: true,
     user: {
-      username: u.username,
-      role: u.role,
-      status,
-      expiresAt: u.expires_at,
-      remainingMs: (u.expires_at && u.expires_at > now) ? u.expires_at - now : 0
+      username: u.username, role: u.role, status,
+      expiresAt: u.expires_at, remainingMs: (u.expires_at && u.expires_at > now) ? u.expires_at - now : 0
     }
   });
 });
@@ -306,13 +283,8 @@ app.post('/api/verify-slip', requireLogin, upload.single('slip'), async (req, re
     }
 
     // 2. ตรวจสอบชื่อบัญชีผู้รับ
-    if (expectedNameTH || expectedNameEN) {
-      const foundTH = expectedNameTH && cleanText.includes(expectedNameTH);
-      const foundEN = expectedNameEN && textUpper.includes(expectedNameEN);
-      
-      if (!foundTH && !foundEN) {
-        return res.json({ ok: false, msg: 'ชื่อผู้รับเงินในสลิปไม่ตรงกับร้าน (ไม่พบชื่อไทยหรืออังกฤษ)' });
-      }
+    if (EXPECTED_NAME && !cleanText.includes(EXPECTED_NAME.replace(/\s+/g, ''))) {
+      return res.json({ ok: false, msg: 'ชื่อผู้รับเงินในสลิปไม่ตรงกับร้าน' });
     }
 
     // 3. ตรวจสอบเลขบัญชี 4 ตัวท้าย
