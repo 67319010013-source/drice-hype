@@ -305,11 +305,6 @@
     color: #fff;
     box-shadow: 0 4px 20px rgba(185, 28, 28, 0.5);
   }
-  .net-banner.slow {
-    background: linear-gradient(180deg, #d97706, #92400e);
-    color: #fff;
-    box-shadow: 0 4px 20px rgba(217, 119, 6, 0.5);
-  }
   .net-banner.online {
     background: linear-gradient(180deg, #059669, #047857);
     color: #fff;
@@ -951,7 +946,7 @@
       </table>
 
       <p style="font-size:0.75rem;color:var(--muted);margin-top:10px;">
-        ⏱️ <b>ตัวอย่าง:</b> ถ้าแจ้งเตือนได้ "สั้น 3 ครั้ง" + "ยาว 1 ครั้ง"<br>
+        ⏱️ <b>ตัวอย่าง:</b> ถ้าการแจ้งเตือนได้ "สั้น 3 ครั้ง" + "ยาว 1 ครั้ง"<br>
         → สั่นสั้น 3 ครั้ง → หยุดพัก 1 วิ → สั่นยาว 1 ครั้ง
       </p>
 
@@ -1130,16 +1125,19 @@ async function api(path, options = {}) {
                         || e.message.includes('NetworkError')
                         || e.message.includes('Network request failed');
     
-    if (isTimeout || isNetworkError) {
-  // ⭐ ไม่แยก timeout/slow — รวมเป็น offline
-  setOnlineStatus(false, 'offline');
-  return { 
-    ok: false, 
-    code: 'NETWORK_ERROR',
-    networkError: true,
-    msg: 'ไม่มีการเชื่อมต่ออินเทอร์เน็ต'
-  };
-}
+        if (isTimeout || isNetworkError) {
+      // ⭐ ไม่แสดง banner ตอน timeout — แค่ log ไว้ดู
+      // แสดงเฉพาะตอน offline จริงเท่านั้น
+      if (!isTimeout) {
+        setOnlineStatus(false, 'offline');
+      }
+      return { 
+        ok: false, 
+        code: 'NETWORK_ERROR',
+        networkError: true,
+        msg: isTimeout ? 'เซิร์ฟเวอร์ตอบช้า' : 'ไม่มีการเชื่อมต่ออินเทอร์เน็ต'
+      };
+    }
     
     return { 
       ok: false, 
@@ -1279,10 +1277,11 @@ function beep(ms, freq, times) {
 function setOnlineStatus(isOk, mode = 'offline') {
   if (!els.netBanner) return;
   
-  // ⭐ ข้าม slow mode — แสดงเฉพาะ offline
-  if (!isOk && mode === 'slow') return;
+  // ⭐ ตัด mode 'slow' ออก — ให้เป็น 'offline' เสมอ
+  if (mode === 'slow') mode = 'offline';
   
   if (isOk) {
+    // กลับมาออนไลน์
     networkOkCount = 0;
     if (isOnline === true) return;
     
@@ -1298,6 +1297,7 @@ function setOnlineStatus(isOk, mode = 'offline') {
     
     console.log('🌐 Online');
   } else {
+    // ออฟไลน์ — แสดงเฉพาะ "ไม่มีสัญญาณอินเทอร์เน็ต"
     if (isOnline === false && els.netBanner.classList.contains('offline')) return;
     
     isOnline = false;
@@ -1324,8 +1324,11 @@ if (els.netRetryBtn) {
           routeByUserStatus();
         }
       }
-    } else if (r.networkError) {
-      setOnlineStatus(false, r.msg?.includes('ช้า') ? 'slow' : 'offline');
+    } else if (r.networkError && !r.msg?.includes('ช้า')) {
+      setOnlineStatus(false, 'offline');
+    } else {
+      // ถ้า timeout → ปิด banner
+      if (els.netBanner) els.netBanner.classList.remove('show');
     }
   });
 }
@@ -1334,9 +1337,10 @@ if (els.netRetryBtn) {
 window.addEventListener('online', () => {
   console.log('🌐 Browser: online');
   networkOkCount = 0;
+  // ทดสอบ server จริง
   api('/api/health').then(r => {
     if (r.ok) setOnlineStatus(true);
-    else if (r.networkError) setOnlineStatus(false, 'offline');  // ⭐
+    else if (r.networkError) setOnlineStatus(false, 'slow');
   });
 });
 
@@ -1352,8 +1356,13 @@ function startNetHeartbeat() {
   netHeartbeatTimer = setInterval(async () => {
     if (!currentUser) return;
     const r = await api('/api/health');
-    if (r.ok) setOnlineStatus(true);
-    else if (r.networkError) setOnlineStatus(false, 'offline');  // ⭐ เปลี่ยนเป็น offline
+    if (r.ok) {
+      setOnlineStatus(true);
+    } else if (r.networkError && !r.msg?.includes('ช้า')) {
+      // ⭐ ขึ้นเฉพาะ offline จริง ไม่ขึ้น slow
+      setOnlineStatus(false, 'offline');
+    }
+    // ถ้า timeout → ไม่ทำอะไร
   }, 15000);
 }
 startNetHeartbeat();
