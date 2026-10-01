@@ -1,429 +1,927 @@
-require('dotenv').config();
+// ============================================================
+// drice-miter — Backend (Express + Turso + QR + Slip Verify)
+// ============================================================
+import 'dotenv/config';
+import express from 'express';
+import cookieParser from 'cookie-parser';
+import crypto from 'crypto';
+import path from 'path';
+import fs from 'fs';
+import multer from 'multer';
+import { createClient } from '@libsql/client';
+import { fileURLToPath } from 'url';
+import { Jimp } from 'jimp';
+import jsQR from 'jsqr';
+import Tesseract from 'tesseract.js';
 
-const express = require('express');
-const session = require('express-session');
-const bcrypt = require('bcryptjs');
-const cors = require('cors');
-const path = require('path');
-const fs = require('fs');
-const multer = require('multer');
-const Tesseract = require('tesseract.js'); 
-const { createClient } = require('@libsql/client');
-const Jimp = require('jimp');
-const jsQR = require('jsqr');
-
+const __dirname = path.dirname(fileURLToPath(import.meta.url));
 const app = express();
 const PORT = process.env.PORT || 3000;
 
 // ============================================================
-// CONFIG
+//  Config
 // ============================================================
-const AMOUNT = 500;                          // ราคา 500 บาท
-const DURATION_MS = 24 * 60 * 60 * 1000;     // 24 ชั่วโมง
-const PAYMENT_TIMEOUT_MS = 10 * 60 * 1000;   // 10 นาที (ถ้าไม่จ่ายลบไอดี)
-const ADMIN_DEFAULT_USER = 'admin';
-const ADMIN_DEFAULT_PASS = '0647748563';
+const SESSION_HOURS = 24;
+const PAYMENT_AMOUNT = Number(process.env.PAYMENT_AMOUNT || 500);
+const PAYMENT_WINDOW_MIN = Number(process.env.PAYMENT_WINDOW_MIN || 15);
+const PAYMENT_WINDOW_MS = PAYMENT_WINDOW_MIN * 60 * 1000;
+const ADMIN_USER = process.env.ADMIN_USER || 'admin';
+const ADMIN_PASS = process.env.ADMIN_PASS || '0647748563';
 
-const EXPECTED_ACCOUNT_LAST4 = process.env.RECEIVER_ACCOUNT_LAST4 || '';
-const EXPECTED_NAME = process.env.RECEIVER_NAME || '';
+// ⭐ ตั้งค่าชื่อผู้รับ (รองรับทั้งไทยและอังกฤษ)
+const EXPECTED_NAME = (process.env.RECEIVER_NAME || '').trim();
+const EXPECTED_NAME_EN = (process.env.RECEIVER_NAME_EN || '').trim();
+const EXPECTED_LAST4 = (process.env.RECEIVER_ACCOUNT_LAST4 || '').trim();
 
-// ตั้งค่ารับไฟล์รูปภาพ (เก็บไว้ใน Memory ชั่วคราวก่อนเพื่อรอตรวจสอบ)
-const upload = multer({
-  storage: multer.memoryStorage(),
-  limits: { fileSize: 10 * 1024 * 1024 }, // รับไฟล์ใหญ่สุด 10MB
-  fileFilter: (req, file, cb) => {
-    if (file.mimetype.startsWith('image/')) {
-      cb(null, true);
-    } else {
-      cb(new Error('รองรับเฉพาะไฟล์รูปภาพเท่านั้น'));
-    }
-  }
-});
+// ⭐ ตั้งค่าระยะเวลาลบ user ที่หมดอายุ (7 วัน)
+const CLEANUP_EXPIRED_DAYS = 7; 
+const CLEANUP_INTERVAL_MS = 60 * 60 * 1000; // ตรวจสอบทุก 1 ชั่วโมง
 
-// ============================================================
-// TURSO CONNECTION & DB INIT
-// ============================================================
 if (!process.env.TURSO_DATABASE_URL || !process.env.TURSO_AUTH_TOKEN) {
-  console.error('❌ ต้องตั้งค่า TURSO_DATABASE_URL และ TURSO_AUTH_TOKEN ใน .env');
+  console.error('❌ ต้องตั้งค่า TURSO_DATABASE_URL และ TURSO_AUTH_TOKEN');
   process.exit(1);
 }
 
-const turso = createClient({
+const db = createClient({
   url: process.env.TURSO_DATABASE_URL,
   authToken: process.env.TURSO_AUTH_TOKEN,
 });
 
-async function dbGet(sql, args = []) {
-  const r = await turso.execute({ sql, args });
-  return r.rows[0] || null;
-}
-async function dbAll(sql, args = []) {
-  const r = await turso.execute({ sql, args });
-  return r.rows;
-}
-async function dbRun(sql, args = []) {
-  return await turso.execute({ sql, args });
-}
-
+// ============================================================
+//  Folder setup
+// ============================================================
 const PUBLIC_DIR = path.join(__dirname, 'public');
-if (!fs.existsSync(PUBLIC_DIR)) fs.mkdirSync(PUBLIC_DIR, { recursive: true });
-
-async function initDB() {
-  await dbRun(`
-    CREATE TABLE IF NOT EXISTS users (
-      id INTEGER PRIMARY KEY AUTOINCREMENT,
-      username TEXT UNIQUE NOT NULL,
-      password_hash TEXT NOT NULL,
-      role TEXT NOT NULL DEFAULT 'user',
-      status TEXT NOT NULL DEFAULT 'unpaid',
-      paid_at INTEGER,
-      expires_at INTEGER,
-      transaction_id TEXT,
-      created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
-      created_by TEXT
-    )
-  `);
-
-  await dbRun(`
-    CREATE TABLE IF NOT EXISTS payment_intents (
-      id INTEGER PRIMARY KEY AUTOINCREMENT,
-      ref TEXT UNIQUE NOT NULL,
-      username TEXT NOT NULL,
-      amount INTEGER NOT NULL,
-      status TEXT NOT NULL DEFAULT 'pending',
-      created_at INTEGER NOT NULL,
-      paid_at INTEGER,
-      transaction_id TEXT,
-      slip_trans_ref TEXT
-    )
-  `);
-
-  // เพิ่มคอลัมน์ใหม่สำหรับเก็บลิงก์รูปสลิป
-  try { await dbRun(`ALTER TABLE payment_intents ADD COLUMN slip_trans_ref TEXT`); } catch (e) {}
-  try { await dbRun(`ALTER TABLE payment_intents ADD COLUMN slip_image_url TEXT`); } catch (e) {}
-  try { await dbRun(`ALTER TABLE users ADD COLUMN last_slip_url TEXT`); } catch (e) {}
-
-  await dbRun(`CREATE INDEX IF NOT EXISTS idx_payment_ref ON payment_intents(ref)`);
-  await dbRun(`CREATE INDEX IF NOT EXISTS idx_payment_username ON payment_intents(username)`);
-  await dbRun(`CREATE INDEX IF NOT EXISTS idx_users_username ON users(username)`);
-
-  const admin = await dbGet('SELECT 1 FROM users WHERE username=?', [ADMIN_DEFAULT_USER]);
-  if (!admin) {
-    const hash = bcrypt.hashSync(ADMIN_DEFAULT_PASS, 10);
-    await dbRun(
-      `INSERT INTO users (username,password_hash,role,status,created_by) VALUES (?,?,?,?,?)`,
-      [ADMIN_DEFAULT_USER, hash, 'admin', 'paid', 'system']
-    );
-  }
-}
+const SLIPS_DIR = path.join(PUBLIC_DIR, 'slips');
+fs.mkdirSync(SLIPS_DIR, { recursive: true });
 
 // ============================================================
-// MIDDLEWARE
+//  Multer
+// ============================================================
+const upload = multer({
+  storage: multer.memoryStorage(),
+  limits: { fileSize: 10 * 1024 * 1024 },
+  fileFilter: (_req, file, cb) => {
+    if (file.mimetype.startsWith('image/')) cb(null, true);
+    else cb(new Error('รองรับเฉพาะไฟล์รูปภาพ'));
+  },
+});
+
+// ============================================================
+//  Middleware
 // ============================================================
 app.set('trust proxy', 1);
-app.use(express.json());
-app.use(express.urlencoded({ extended: true }));
-app.use(cors({ origin: true, credentials: true }));
+app.use(express.json({ limit: '1mb' }));
+app.use(cookieParser());
 
-app.use(session({
-  name: 'fd.sid',
-  secret: process.env.SESSION_SECRET || 'fd-secret-key-1234',
-  resave: false, saveUninitialized: false,
-  cookie: { httpOnly: true, secure: false, maxAge: 30 * 24 * 60 * 60 * 1000 }
-}));
+// Debug log — ทุก request
+app.use((req, _res, next) => {
+  if (req.path.startsWith('/api/')) {
+    console.log(`[${new Date().toLocaleTimeString('th-TH')}] ${req.method} ${req.path}`);
+  }
+  next();
+});
 
-function requireLogin(req, res, next) {
-  if (!req.session.user) return res.status(401).json({ ok: false, msg: 'กรุณาเข้าสู่ระบบ' });
-  next();
-}
-function requireAdmin(req, res, next) {
-  if (!req.session.user || req.session.user.role !== 'admin')
-    return res.status(403).json({ ok: false, msg: 'ต้องเป็นแอดมินเท่านั้น' });
-  next();
+// Static files (index.html, css, js, slips)
+app.use(express.static(PUBLIC_DIR, { dotfiles: 'deny', index: false }));
+
+// ============================================================
+//  DB Init
+// ============================================================
+async function initDB() {
+  await db.batch([
+    `CREATE TABLE IF NOT EXISTS users (
+       id INTEGER PRIMARY KEY AUTOINCREMENT,
+       username TEXT UNIQUE NOT NULL,
+       password_hash TEXT NOT NULL,
+       salt TEXT NOT NULL,
+       created_at INTEGER NOT NULL,
+       expires_at INTEGER NOT NULL,
+       is_admin INTEGER NOT NULL DEFAULT 0,
+       payment_status TEXT NOT NULL DEFAULT 'unpaid',
+       payment_ref TEXT,
+       payment_expires_at INTEGER,
+       last_slip_url TEXT
+     )`,
+    `CREATE TABLE IF NOT EXISTS sessions (
+       token TEXT PRIMARY KEY,
+       user_id INTEGER NOT NULL,
+       expires_at INTEGER NOT NULL
+     )`,
+    `CREATE TABLE IF NOT EXISTS payment_intents (
+       id INTEGER PRIMARY KEY AUTOINCREMENT,
+       ref TEXT UNIQUE NOT NULL,
+       user_id INTEGER NOT NULL,
+       username TEXT NOT NULL,
+       amount INTEGER NOT NULL,
+       status TEXT NOT NULL DEFAULT 'pending',
+       created_at INTEGER NOT NULL,
+       expires_at INTEGER NOT NULL,
+       paid_at INTEGER,
+       slip_qr_payload TEXT,
+       slip_image_url TEXT,
+       reject_reason TEXT,
+       detected_name TEXT,
+       detected_time TEXT,
+       ocr_text TEXT,
+       admin_note TEXT
+     )`,
+    `CREATE INDEX IF NOT EXISTS idx_sessions_user ON sessions(user_id)`,
+    `CREATE INDEX IF NOT EXISTS idx_sessions_exp  ON sessions(expires_at)`,
+    `CREATE INDEX IF NOT EXISTS idx_pay_ref       ON payment_intents(ref)`,
+    `CREATE INDEX IF NOT EXISTS idx_pay_user      ON payment_intents(user_id)`,
+  ]);
+
+  // Migration (for old DB)
+  const alters = [
+    `ALTER TABLE users ADD COLUMN payment_status TEXT NOT NULL DEFAULT 'unpaid'`,
+    `ALTER TABLE users ADD COLUMN payment_ref TEXT`,
+    `ALTER TABLE users ADD COLUMN payment_expires_at INTEGER`,
+    `ALTER TABLE users ADD COLUMN last_slip_url TEXT`,
+    `ALTER TABLE payment_intents ADD COLUMN detected_name TEXT`,
+    `ALTER TABLE payment_intents ADD COLUMN detected_time TEXT`,
+    `ALTER TABLE payment_intents ADD COLUMN ocr_text TEXT`,
+    `ALTER TABLE payment_intents ADD COLUMN admin_note TEXT`,
+  ];
+  for (const sql of alters) {
+    try { await db.execute(sql); } catch { /* column exists */ }
+  }
+
+  // ============================================================
+  //  Admin — create or fix
+  // ============================================================
+  const now = Date.now();
+  const farFuture = now + 100 * 365 * 24 * 3600 * 1000;
+
+  const r = await db.execute({
+    sql: 'SELECT id, is_admin, expires_at, payment_status FROM users WHERE username=?',
+    args: [ADMIN_USER],
+  });
+
+  if (r.rows.length === 0) {
+    const salt = crypto.randomBytes(16).toString('hex');
+    const hash = crypto.scryptSync(ADMIN_PASS, salt, 64).toString('hex');
+    await db.execute({
+      sql: `INSERT INTO users (username,password_hash,salt,created_at,expires_at,is_admin,payment_status)
+            VALUES (?,?,?,?,?,1,'paid')`,
+      args: [ADMIN_USER, hash, salt, now, farFuture],
+    });
+    console.log(`✅ สร้างแอดมิน: ${ADMIN_USER}`);
+  } else {
+    const a = r.rows[0];
+    const needFix =
+      Number(a.is_admin) !== 1 ||
+      a.payment_status !== 'paid' ||
+      Number(a.expires_at) < now + 365 * 24 * 3600 * 1000;
+
+    if (needFix) {
+      await db.execute({
+        sql: `UPDATE users SET is_admin=1, payment_status='paid', expires_at=? WHERE username=?`,
+        args: [farFuture, ADMIN_USER],
+      });
+      console.log(`🔧 แก้ไขแอดมิน: ${ADMIN_USER}`);
+    } else {
+      console.log(`✅ แอดมินพร้อม: ${ADMIN_USER}`);
+    }
+  }
+
+  // Clean expired sessions
+  await db.execute({ sql: 'DELETE FROM sessions WHERE expires_at < ?', args: [Date.now()] });
+  console.log('✅ DB พร้อมใช้งาน');
 }
 
 // ============================================================
-// AUTH API
+//  Helpers
 // ============================================================
-app.get('/api/health', (req, res) => res.json({ ok: true }));
+const hashPw = (pw, salt) => crypto.scryptSync(pw, salt, 64).toString('hex');
+const newToken = () => crypto.randomBytes(32).toString('hex');
+const newRef = () =>
+  'FD' + Date.now().toString(36).toUpperCase() + crypto.randomBytes(3).toString('hex').toUpperCase();
 
-app.get('/api/me', requireLogin, async (req, res) => {
-  const u = await dbGet('SELECT * FROM users WHERE username=?', [req.session.user.username]);
-  if (!u) { req.session.destroy(()=>{}); return res.json({ ok: false, msg: 'บัญชีถูกลบ' }); }
+async function getUserFromReq(req) {
+  const token = req.cookies?.session;
+  if (!token) return null;
+  const r = await db.execute({
+    sql: `SELECT u.*, s.expires_at AS session_exp
+          FROM sessions s JOIN users u ON u.id = s.user_id
+          WHERE s.token = ? AND s.expires_at > ?`,
+    args: [token, Date.now()],
+  });
+  return r.rows[0] || null;
+}
+
+function setSessionCookie(res, token, maxAgeMs) {
+  res.cookie('session', token, {
+    httpOnly: true,
+    sameSite: 'lax',
+    secure: process.env.NODE_ENV === 'production',
+    maxAge: maxAgeMs,
+  });
+}
+
+async function createOrGetPendingIntent(user) {
+  const now = Date.now();
+
+  await db.execute({
+    sql: `UPDATE payment_intents SET status='expired'
+          WHERE user_id=? AND status='pending' AND expires_at <= ?`,
+    args: [user.id, now],
+  });
+
+  const cur = await db.execute({
+    sql: `SELECT * FROM payment_intents
+          WHERE user_id=? AND status='pending' AND expires_at > ?
+          ORDER BY id DESC LIMIT 1`,
+    args: [user.id, now],
+  });
+  if (cur.rows.length > 0) return cur.rows[0];
+
+  const ref = newRef();
+  const payExp = now + PAYMENT_WINDOW_MS;
+  await db.execute({
+    sql: `INSERT INTO payment_intents (ref,user_id,username,amount,status,created_at,expires_at)
+          VALUES (?,?,?,?,?,?,?)`,
+    args: [ref, user.id, user.username, PAYMENT_AMOUNT, 'pending', now, payExp],
+  });
+  await db.execute({
+    sql: `UPDATE users SET payment_ref=?, payment_expires_at=? WHERE id=?`,
+    args: [ref, payExp, user.id],
+  });
+  const r = await db.execute({ sql: `SELECT * FROM payment_intents WHERE ref=?`, args: [ref] });
+  return r.rows[0];
+}
+
+function buildMeResponse(u) {
+  const isAdmin = Number(u.is_admin) === 1;
+  return {
+    username: u.username,
+    expires_at: Number(u.expires_at) || 0,
+    is_admin: isAdmin ? 1 : 0,
+    created_at: Number(u.created_at) || 0,
+    payment_status: u.payment_status || 'unpaid',
+  };
+}
+
+// ============================================================
+//  =============== API ROUTES (ทั้งหมด) ===============
+// ============================================================
+
+// ---------- AUTH: Register ----------
+app.post('/api/register', async (req, res) => {
+  const { username, password } = req.body || {};
+  if (!username || !password) return res.status(400).json({ error: 'กรอกข้อมูลไม่ครบ' });
+  if (username.length < 3 || username.length > 32)
+    return res.status(400).json({ error: 'ชื่อผู้ใช้ต้อง 3–32 ตัวอักษร' });
+  if (!/^[A-Za-z0-9_\u0E00-\u0E7F]+$/.test(username))
+    return res.status(400).json({ error: 'ชื่อผู้ใช้ใช้ได้เฉพาะตัวอักษร ตัวเลข _ และภาษาไทย' });
+  if (password.length < 4) return res.status(400).json({ error: 'รหัสผ่านต้อง >= 4 ตัวอักษร' });
+
+  const salt = crypto.randomBytes(16).toString('hex');
+  const hash = hashPw(password, salt);
+  const now = Date.now();
+
+  try {
+    const r = await db.execute({
+      sql: `INSERT INTO users (username,password_hash,salt,created_at,expires_at,is_admin,payment_status)
+            VALUES (?,?,?,?,?,0,'unpaid')`,
+      args: [username, hash, salt, now, 0],
+    });
+    const userId = Number(r.lastInsertRowid);
+
+    // session 24h ระหว่างรอจ่าย
+    const sessionExp = now + SESSION_HOURS * 3600 * 1000;
+    const token = newToken();
+    await db.execute({
+      sql: 'INSERT INTO sessions (token,user_id,expires_at) VALUES (?,?,?)',
+      args: [token, userId, sessionExp],
+    });
+    setSessionCookie(res, token, SESSION_HOURS * 3600 * 1000);
+
+    // payment intent
+    const ref = newRef();
+    const payExp = now + PAYMENT_WINDOW_MS;
+    await db.execute({
+      sql: `INSERT INTO payment_intents (ref,user_id,username,amount,status,created_at,expires_at)
+            VALUES (?,?,?,?,?,?,?)`,
+      args: [ref, userId, username, PAYMENT_AMOUNT, 'pending', now, payExp],
+    });
+    await db.execute({
+      sql: `UPDATE users SET payment_ref=?, payment_expires_at=? WHERE id=?`,
+      args: [ref, payExp, userId],
+    });
+
+    console.log(`✅ สมัครใหม่: ${username} (id=${userId})`);
+
+    res.json({
+      ok: true,
+      username,
+      expires_at: 0,
+      is_admin: 0,
+      need_payment: true,
+      payment: {
+        ref,
+        amount: PAYMENT_AMOUNT,
+        expires_at: payExp,
+        reason: 'unpaid',
+      },
+    });
+  } catch (e) {
+    if (String(e.message).includes('UNIQUE'))
+      return res.status(400).json({ error: 'ชื่อผู้ใช้นี้ถูกใช้แล้ว' });
+    console.error('register error:', e);
+    res.status(500).json({ error: 'เกิดข้อผิดพลาดภายใน' });
+  }
+});
+
+// ---------- AUTH: Login ----------
+app.post('/api/login', async (req, res) => {
+  const { username, password } = req.body || {};
+  if (!username || !password) return res.status(400).json({ error: 'กรอกข้อมูลไม่ครบ' });
+
+  const r = await db.execute({ sql: 'SELECT * FROM users WHERE username=?', args: [username] });
+  if (r.rows.length === 0)
+    return res.status(401).json({ error: 'ชื่อผู้ใช้หรือรหัสผ่านไม่ถูกต้อง' });
+
+  const u = r.rows[0];
+  if (hashPw(password, u.salt) !== u.password_hash)
+    return res.status(401).json({ error: 'ชื่อผู้ใช้หรือรหัสผ่านไม่ถูกต้อง' });
+
+  const isAdmin = Number(u.is_admin) === 1;
+  const isUnpaid = !isAdmin && u.payment_status !== 'paid';
+  const isExpired = !isAdmin && u.payment_status === 'paid' && Date.now() > u.expires_at;
+  const needNewPayment = isUnpaid || isExpired;
+
+  // session expiry
+  let sessionExp;
+  if (isAdmin) {
+    sessionExp = Date.now() + 365 * 24 * 3600 * 1000;
+  } else if (needNewPayment) {
+    sessionExp = Date.now() + SESSION_HOURS * 3600 * 1000;
+  } else {
+    sessionExp = Math.max(Number(u.expires_at), Date.now() + 60_000);
+  }
+
+  const token = newToken();
+  await db.execute({
+    sql: 'INSERT INTO sessions (token,user_id,expires_at) VALUES (?,?,?)',
+    args: [token, u.id, sessionExp],
+  });
+  setSessionCookie(res, token, Math.max(60_000, sessionExp - Date.now()));
+
+  let needPayment = false;
+  let payment = null;
+  if (needNewPayment) {
+    const pi = await createOrGetPendingIntent(u);
+    needPayment = true;
+    payment = {
+      ref: pi.ref,
+      amount: pi.amount,
+      expires_at: pi.expires_at,
+      reason: isExpired ? 'expired' : 'unpaid',
+    };
+  }
+
+  console.log(`✅ login: ${username} (admin=${isAdmin}, need_payment=${needPayment})`);
+
+  res.json({
+    ok: true,
+    username: u.username,
+    expires_at: Number(u.expires_at) || 0,
+    is_admin: isAdmin ? 1 : 0,
+    need_payment: needPayment,
+    payment,
+  });
+});
+
+// ---------- AUTH: Logout ----------
+app.post('/api/logout', async (req, res) => {
+  const token = req.cookies?.session;
+  if (token) await db.execute({ sql: 'DELETE FROM sessions WHERE token=?', args: [token] });
+  res.clearCookie('session');
+  res.json({ ok: true });
+});
+
+// ---------- AUTH: Me ----------
+app.get('/api/me', async (req, res) => {
+  const u = await getUserFromReq(req);
+  if (!u) return res.status(401).json({ error: 'ยังไม่ได้เข้าสู่ระบบ' });
+
+  const isAdmin = Number(u.is_admin) === 1;
+  const isUnpaid = !isAdmin && u.payment_status !== 'paid';
+  const isExpired = !isAdmin && u.payment_status === 'paid' && Date.now() > u.expires_at;
+  const needNewPayment = isUnpaid || isExpired;
+
+  let needPayment = false;
+  let payment = null;
+  if (needNewPayment) {
+    const pi = await createOrGetPendingIntent(u);
+    needPayment = true;
+    payment = {
+      ref: pi.ref,
+      amount: pi.amount,
+      expires_at: pi.expires_at,
+      reason: isExpired ? 'expired' : 'unpaid',
+    };
+  }
+
+  res.json({
+    ...buildMeResponse(u),
+    need_payment: needPayment,
+    payment,
+  });
+});
+
+// ---------- PAYMENT: New ----------
+app.post('/api/payment/new', async (req, res) => {
+  const u = await getUserFromReq(req);
+  if (!u) return res.status(401).json({ error: 'ยังไม่ได้เข้าสู่ระบบ' });
+  if (u.payment_status === 'paid' && Date.now() < u.expires_at)
+    return res.json({ ok: true, already_paid: true });
 
   const now = Date.now();
-  let status = u.status;
-  if (u.role !== 'admin' && status === 'paid' && u.expires_at && u.expires_at <= now) {
-    await dbRun('UPDATE users SET status=? WHERE id=?', ['expired', u.id]);
-    status = 'expired';
+  const ref = newRef();
+  const payExp = now + PAYMENT_WINDOW_MS;
+
+  await db.execute({
+    sql: `INSERT INTO payment_intents (ref,user_id,username,amount,status,created_at,expires_at)
+          VALUES (?,?,?,?,?,?,?)`,
+    args: [ref, u.id, u.username, PAYMENT_AMOUNT, 'pending', now, payExp],
+  });
+  await db.execute({
+    sql: `UPDATE users SET payment_ref=?, payment_expires_at=? WHERE id=?`,
+    args: [ref, payExp, u.id],
+  });
+
+  res.json({ ok: true, ref, amount: PAYMENT_AMOUNT, expires_at: payExp });
+});
+
+// ---------- PAYMENT: Status ----------
+app.get('/api/payment/status', async (req, res) => {
+  const u = await getUserFromReq(req);
+  if (!u) return res.status(401).json({ error: 'ยังไม่ได้เข้าสู่ระบบ' });
+
+  if (u.payment_status === 'paid' && Date.now() < u.expires_at)
+    return res.json({ ok: true, paid: true });
+
+  const ref = req.query.ref;
+  const r = await db.execute({
+    sql: `SELECT * FROM payment_intents WHERE ref=? AND user_id=?`,
+    args: [ref, u.id],
+  });
+  if (r.rows.length === 0) return res.json({ ok: true, paid: false });
+
+  const pi = r.rows[0];
+  res.json({
+    ok: true,
+    paid: pi.status === 'paid',
+    status: pi.status,
+    reject_reason: pi.reject_reason,
+    expires_at: pi.expires_at,
+  });
+});
+
+// ---------- PAYMENT: Paid (refresh me) ----------
+app.get('/api/payment/paid', async (req, res) => {
+  const u = await getUserFromReq(req);
+  if (!u) return res.status(401).json({ error: 'ยังไม่ได้เข้าสู่ระบบ' });
+
+  const isAdmin = Number(u.is_admin) === 1;
+  const isPaid = u.payment_status === 'paid' && Date.now() < u.expires_at;
+
+  if (!isAdmin && !isPaid) {
+    return res.json({ ok: true, paid: false, ...buildMeResponse(u), need_payment: true });
   }
 
   res.json({
     ok: true,
-    user: {
-      username: u.username, role: u.role, status,
-      expiresAt: u.expires_at, remainingMs: (u.expires_at && u.expires_at > now) ? u.expires_at - now : 0
-    }
+    paid: true,
+    ...buildMeResponse(u),
+    need_payment: false,
+    payment: null,
   });
 });
 
-app.post('/api/register', async (req, res) => {
-  const { username, password } = req.body || {};
-  if (!username || password.length < 4) return res.json({ ok: false, msg: 'ข้อมูลไม่ถูกต้อง' });
-
-  const exists = await dbGet('SELECT 1 FROM users WHERE username=?', [username]);
-  if (exists) return res.json({ ok: false, msg: 'ชื่อผู้ใช้นี้มีอยู่แล้ว' });
-
-  const hash = bcrypt.hashSync(password, 10);
-  await dbRun(`INSERT INTO users (username,password_hash,role,status,created_by) VALUES (?,?,?,?,?)`, [username, hash, 'user', 'unpaid', 'self']);
-
-  req.session.user = { username, role: 'user' };
-  req.session.save(() => res.json({ ok: true, user: { username, role: 'user', status: 'unpaid' } }));
-});
-
-app.post('/api/login', async (req, res) => {
-  const { username, password } = req.body || {};
-  const user = await dbGet('SELECT * FROM users WHERE username=?', [username]);
-  if (!user || !bcrypt.compareSync(password, user.password_hash)) 
-    return res.json({ ok: false, msg: 'ชื่อผู้ใช้หรือรหัสผ่านไม่ถูกต้อง' });
-
-  // ⭐ คำนวณสถานะปัจจุบัน (เช็คหมดอายุ)
-  const now = Date.now();
-  let status = user.status;
-  if (user.role !== 'admin' && status === 'paid' && user.expires_at && user.expires_at <= now) {
-    await dbRun('UPDATE users SET status=? WHERE id=?', ['expired', user.id]);
-    status = 'expired';
-  }
-
-  req.session.user = { username: user.username, role: user.role };
-  req.session.save(() => res.json({
-    ok: true,
-    user: {                                    // ⭐ ส่ง user object กลับ
-      username: user.username,
-      role: user.role,
-      status: status,
-      expiresAt: user.expires_at,
-      remainingMs: (user.expires_at && user.expires_at > now) ? user.expires_at - now : 0
-    }
-  }));
-});
-
-app.post('/api/logout', (req, res) => { req.session.destroy(() => res.json({ ok: true })); });
-
-// ============================================================
-// PAYMENT API 
-// ============================================================
-app.post('/api/create-payment', requireLogin, async (req, res) => {
-  const username = req.session.user.username;
-  const existing = await dbGet(`SELECT * FROM payment_intents WHERE username=? AND status='pending' AND created_at > ? ORDER BY id DESC LIMIT 1`, [username, Date.now() - PAYMENT_TIMEOUT_MS]);
-
-  if (existing) return res.json({ ok: true, ref: existing.ref, amount: existing.amount, reused: true });
-
-  const ref = 'FD' + Date.now().toString(36).toUpperCase() + Math.random().toString(36).slice(2, 6).toUpperCase();
-  await dbRun(`INSERT INTO payment_intents (ref, username, amount, status, created_at) VALUES (?,?,?,?,?)`, [ref, username, AMOUNT, 'pending', Date.now()]);
-  res.json({ ok: true, ref, amount: AMOUNT });
-});
-
-app.get('/api/check-payment', requireLogin, async (req, res) => {
-  const { ref } = req.query;
-  const intent = await dbGet('SELECT * FROM payment_intents WHERE ref=? AND username=?', [ref, req.session.user.username]);
-  if (!intent) return res.json({ ok: false });
-
-  if (intent.status === 'paid') {
-    const u = await dbGet('SELECT * FROM users WHERE username=?', [req.session.user.username]);
-    const now = Date.now();
-    const baseTime = (u.status === 'paid' && u.expires_at && u.expires_at > now) ? u.expires_at : now;
-    await dbRun(`UPDATE users SET status=?, paid_at=?, expires_at=? WHERE id=?`, ['paid', now, baseTime + DURATION_MS, u.id]);
-    return res.json({ ok: true, paid: true });
-  }
-  res.json({ ok: true, paid: false, status: intent.status });
-});
-
-// ---- ระบบตรวจสอบสลิปอัตโนมัติด้วย AI (QR Code + Tesseract OCR) ----
-app.post('/api/verify-slip', requireLogin, upload.single('slip'), async (req, res) => {
+// ---------- PAYMENT: Upload Slip ----------
+app.post('/api/payment/upload-slip', upload.single('slip'), async (req, res) => {
   try {
+    const u = await getUserFromReq(req);
+    if (!u) return res.status(401).json({ error: 'ยังไม่ได้เข้าสู่ระบบ' });
+    if (u.payment_status === 'paid' && Date.now() < u.expires_at)
+      return res.json({ ok: true, paid: true });
+
     if (!req.file) return res.json({ ok: false, msg: 'กรุณาแนบรูปสลิป' });
 
-    const username = req.session.user.username;
     const { ref } = req.body || {};
-    const intent = await dbGet('SELECT * FROM payment_intents WHERE ref=? AND username=?', [ref, username]);
-    if (!intent || intent.status !== 'pending') return res.json({ ok: false, msg: 'รหัสอ้างอิงไม่ถูกต้อง หรืออาจหมดอายุไปแล้ว (เกิน 10 นาที)' });
+    const pi = await db.execute({
+      sql: `SELECT * FROM payment_intents WHERE ref=? AND user_id=?`,
+      args: [ref, u.id],
+    });
+    if (pi.rows.length === 0) return res.json({ ok: false, msg: 'ไม่พบรายการชำระเงิน' });
 
-    // ==========================================
-    // LAYER 1: สแกน QR Code จากสลิป
-    // ==========================================
-    console.log(`🔍 กำลังค้นหา QR Code ในสลิป...`);
-    const image = await Jimp.read(req.file.buffer);
-    // แปลงภาพเพื่อให้ jsQR อ่านได้
-    const qrCode = jsQR(new Uint8ClampedArray(image.bitmap.data), image.bitmap.width, image.bitmap.height);
+    const intent = pi.rows[0];
+    const now = Date.now();
 
-    let slipQrPayload = null;
-    if (qrCode) {
-      slipQrPayload = qrCode.data;
-      console.log("📝 ข้อมูลจาก QR Code:", slipQrPayload);
+    if (intent.status === 'paid') return res.json({ ok: true, paid: true, msg: 'ชำระแล้ว' });
+    if (now > intent.expires_at)
+      return res.json({
+        ok: false,
+        expired: true,
+        msg: `❌ หมดเวลา ${PAYMENT_WINDOW_MIN} นาทีแล้ว กรุณากด "ขอเวลาใหม่"`,
+      });
 
-      // เช็คว่า QR Code นี้เคยถูกใช้ยืนยันไปแล้วหรือยัง (ป้องกันการวนสลิป 100%)
-      const usedQR = await dbGet('SELECT id FROM payment_intents WHERE slip_trans_ref=?', [slipQrPayload]);
-      if (usedQR) return res.json({ ok: false, msg: '❌ สลิปใบนี้ถูกนำมาใช้ยืนยันไปแล้ว' });
-    } else {
-      console.log("⚠️ ไม่พบ QR Code");
-      return res.json({ ok: false, msg: '❌ ไม่พบ QR Code บนสลิป หรือรูปภาพไม่ชัดเจน (สลิปจริงต้องมี QR)' });
+    // ---- LAYER 1: QR ----
+    console.log('🔍 สแกน QR...');
+    let qrPayload = null;
+    try {
+      const img = await Jimp.read(req.file.buffer);
+      const qr = jsQR(
+        new Uint8ClampedArray(img.bitmap.data),
+        img.bitmap.width,
+        img.bitmap.height
+      );
+      if (qr) qrPayload = qr.data;
+    } catch (e) {
+      console.error('QR decode error:', e.message);
+    }
+    if (!qrPayload) {
+      return res.json({ ok: false, msg: '❌ ไม่พบ QR Code บนสลิป หรือรูปไม่ชัดเจน' });
+    }
+    console.log('📝 QR:', String(qrPayload).slice(0, 80));
+
+    // check duplicate
+    const used = await db.execute({
+      sql: `SELECT id FROM payment_intents WHERE slip_qr_payload=? AND status='paid'`,
+      args: [qrPayload],
+    });
+    if (used.rows.length > 0) {
+      return res.json({ ok: false, msg: '❌ สลิปนี้ถูกใช้ยืนยันไปแล้ว' });
     }
 
-    // ==========================================
-    // LAYER 2: อ่านข้อความด้วย OCR (เช็คยอดเงิน, ชื่อ, เวลา)
-    // ==========================================
-    console.log(`🔍 ตรวจพบ QR กำลังให้ AI อ่านตัวอักษรต่อ...`);
+    // ---- LAYER 2: OCR ----
+    console.log('🔍 OCR...');
     const { data: { text } } = await Tesseract.recognize(req.file.buffer, 'tha+eng');
-    const cleanText = text.replace(/\s+/g, '');
-    
-    // 1. ตรวจสอบยอดเงิน (หาคำว่า 500 หรือ 500.00)
-    if (!cleanText.includes('500.00') && !cleanText.includes('500')) {
-      return res.json({ ok: false, msg: 'AI ไม่พบยอดเงิน 500 บาทในสลิป' });
+    const clean = text.replace(/\s+/g, '');
+    const cleanUpper = clean.toUpperCase();
+
+    // amount
+    const amtStr = String(PAYMENT_AMOUNT);
+    if (!clean.includes(amtStr + '.00') && !clean.includes(amtStr)) {
+      return res.json({ ok: false, msg: `❌ ไม่พบยอดเงิน ${PAYMENT_AMOUNT} บาทในสลิป` });
     }
 
-    // 2. ตรวจสอบชื่อบัญชีผู้รับ
-    if (EXPECTED_NAME && !cleanText.includes(EXPECTED_NAME.replace(/\s+/g, ''))) {
-      return res.json({ ok: false, msg: 'ชื่อผู้รับเงินในสลิปไม่ตรงกับร้าน' });
+    // ⭐ name (ตรวจสอบทั้งไทยและอังกฤษ - อย่างใดอย่างหนึ่ง)
+    const nameCandidates = [
+      EXPECTED_NAME.replace(/\s+/g, ''),                    // ไทย
+      EXPECTED_NAME_EN.replace(/\s+/g, '').toUpperCase(),   // อังกฤษ
+    ].filter(Boolean);
+
+    if (nameCandidates.length > 0) {
+      const matched = nameCandidates.find(n => {
+        if (/^[A-Z0-9]+$/.test(n)) return cleanUpper.includes(n);
+        return clean.includes(n);
+      });
+      if (!matched) {
+        return res.json({
+          ok: false,
+          msg: `❌ ชื่อผู้รับไม่ตรงกับร้าน (ต้องมี "${EXPECTED_NAME}" หรือ "${EXPECTED_NAME_EN}")`,
+        });
+      }
+      console.log('✅ ชื่อตรง:', matched);
     }
 
-    // 3. ตรวจสอบเลขบัญชี 4 ตัวท้าย
-    if (EXPECTED_ACCOUNT_LAST4 && !cleanText.includes(EXPECTED_ACCOUNT_LAST4)) {
-      return res.json({ ok: false, msg: 'เลขบัญชีผู้รับ 4 ตัวท้ายไม่ตรงกัน' });
+    // last4
+    if (EXPECTED_LAST4 && !clean.includes(EXPECTED_LAST4))
+      return res.json({ ok: false, msg: '❌ เลขบัญชี 4 ตัวท้ายไม่ตรง' });
+
+    // time
+    const tm = clean.match(/(\d{2}):(\d{2})/);
+    if (tm) {
+      const hh = +tm[1], mm = +tm[2];
+      const bkk = new Date(new Date().toLocaleString('en-US', { timeZone: 'Asia/Bangkok' }));
+      let diff = (bkk.getHours() * 60 + bkk.getMinutes()) - (hh * 60 + mm);
+      if (diff < -1000) diff += 1440;
+      if (diff > PAYMENT_WINDOW_MIN)
+        return res.json({ ok: false, msg: `❌ สลิปเก่าเกิน ${PAYMENT_WINDOW_MIN} นาที` });
+      if (diff < -5) return res.json({ ok: false, msg: '❌ เวลาในสลิปผิดปกติ' });
     }
 
-    // 4. ตรวจสอบเวลา (ไม่เกิน 10 นาที)
-    const timeMatch = cleanText.match(/(\d{2}):(\d{2})/);
-    if (timeMatch) {
-       const slipHour = parseInt(timeMatch[1], 10);
-       const slipMin = parseInt(timeMatch[2], 10);
-       
-       const now = new Date();
-       const thaiTime = new Date(now.toLocaleString("en-US", {timeZone: "Asia/Bangkok"}));
-       
-       let diffMins = (thaiTime.getHours() * 60 + thaiTime.getMinutes()) - (slipHour * 60 + slipMin);
-       if (diffMins < -1000) diffMins += 24 * 60; // จัดการกรณีโอนข้ามวัน
-
-       if (diffMins > 10) return res.json({ ok: false, msg: 'สลิปนี้หมดอายุแล้ว (โอนผ่านมาเกิน 10 นาที)' });
-       else if (diffMins < -5) return res.json({ ok: false, msg: 'เวลาในสลิปล่วงหน้าผิดปกติ' });
-    } else {
-       console.log("⚠️ AI หาระบุเวลาในสลิปไม่เจอ อนุโลมให้ผ่าน เพราะตรวจ QR ผ่านแล้ว");
-    }
-
-    // ==== บันทึกไฟล์รูปสลิปลงเซิร์ฟเวอร์เพื่อให้แอดมินดู ====
-    const slipsDir = path.join(PUBLIC_DIR, 'slips');
-    if (!fs.existsSync(slipsDir)) fs.mkdirSync(slipsDir, { recursive: true });
-    
+    // ============ ผ่าน — บันทึก + อนุมัติ ============
     const ext = path.extname(req.file.originalname) || '.jpg';
-    const filename = `slip_${username}_${Date.now()}${ext}`;
-    const filepath = path.join(slipsDir, filename);
-    
-    fs.writeFileSync(filepath, req.file.buffer);
-    const slipUrl = `/slips/${filename}`;
-    // ===================================================
+    const fname = `slip_${u.username}_${now}${ext}`;
+    const fpath = path.join(SLIPS_DIR, fname);
+    fs.writeFileSync(fpath, req.file.buffer);
+    const slipUrl = `/slips/${fname}`;
 
-    // ผ่านเงื่อนไขทั้งหมด อนุมัติทันที!
-    const nowStamp = Date.now();
-    await dbRun(
-      // บันทึก slipQrPayload ลงในคอลัมน์ slip_trans_ref เพื่อใช้เช็คสลิปซ้ำในอนาคต
-      `UPDATE payment_intents SET status=?, paid_at=?, transaction_id=?, slip_trans_ref=?, slip_image_url=? WHERE ref=?`,
-      ['paid', nowStamp, 'QR-VERIFIED-' + nowStamp, slipQrPayload, slipUrl, intent.ref]
-    );
+    const detectedTime = tm ? `${tm[1]}:${tm[2]}` : null;
+    const detectedName =
+      (EXPECTED_NAME && clean.includes(EXPECTED_NAME.replace(/\s+/g, '')) ? EXPECTED_NAME : null) ||
+      (EXPECTED_NAME_EN && cleanUpper.includes(EXPECTED_NAME_EN.replace(/\s+/g, '').toUpperCase()) ? EXPECTED_NAME_EN : null);
 
-    await dbRun(`UPDATE users SET last_slip_url=? WHERE username=?`, [slipUrl, username]);
+    await db.execute({
+      sql: `UPDATE payment_intents
+            SET status='paid', paid_at=?, slip_qr_payload=?, slip_image_url=?,
+                detected_name=?, detected_time=?, ocr_text=?
+            WHERE id=?`,
+      args: [now, qrPayload, slipUrl, detectedName, detectedTime, clean.slice(0, 2000), intent.id],
+    });
 
-    console.log(`✅ อนุมัติสลิปสำเร็จ: ${username} (ref=${intent.ref})`);
-    res.json({ ok: true, msg: 'ตรวจสอบสลิปสำเร็จ กำลังเข้าสู่ระบบ...', ref: intent.ref });
+    const base = Math.max(now, Number(u.expires_at) || 0);
+    const userExpiry = base + SESSION_HOURS * 3600 * 1000;
+
+    await db.execute({
+      sql: `UPDATE users SET payment_status='paid', last_slip_url=?, expires_at=? WHERE id=?`,
+      args: [slipUrl, userExpiry, u.id],
+    });
+    await db.execute({
+      sql: 'UPDATE sessions SET expires_at=? WHERE user_id=?',
+      args: [userExpiry, u.id],
+    });
+
+    console.log(`✅ อนุมัติ: ${u.username} หมดอายุ ${new Date(userExpiry).toLocaleString('th-TH')}`);
+    res.json({ ok: true, paid: true, msg: '✅ ตรวจสอบสลิปสำเร็จ!' });
   } catch (e) {
-    res.status(500).json({ ok: false, msg: 'อ่านภาพไม่สำเร็จ โปรดลองใหม่: ' + e.message });
+    console.error('verify-slip error:', e);
+    res.status(500).json({ ok: false, msg: 'อ่านภาพไม่สำเร็จ: ' + e.message });
   }
 });
 
-// ============================================================
-// ADMIN API
-// ============================================================
-app.get('/api/admin/payment-intents', requireAdmin, async (req, res) => {
-  const rows = await dbAll(`SELECT * FROM payment_intents ORDER BY created_at DESC LIMIT 100`);
-  res.json({ ok: true, intents: rows });
+// ---------- ADMIN: middleware ----------
+async function requireAdmin(req, res, next) {
+  try {
+    const u = await getUserFromReq(req);
+    if (!u) return res.status(401).json({ error: 'ยังไม่ได้เข้าสู่ระบบ' });
+    if (Number(u.is_admin) !== 1) return res.status(403).json({ error: 'ต้องเป็นแอดมิน' });
+    req.admin = u;
+    next();
+  } catch (e) {
+    console.error('requireAdmin error:', e);
+    res.status(500).json({ error: 'server error' });
+  }
+}
+
+// ---------- ADMIN: Users list ----------
+app.get('/api/admin/users', requireAdmin, async (_req, res) => {
+  const r = await db.execute(
+    `SELECT id, username, created_at, expires_at, is_admin, payment_status, last_slip_url
+     FROM users ORDER BY id ASC`
+  );
+  res.json(r.rows);
 });
 
-app.post('/api/admin/verify-payment', requireAdmin, async (req, res) => {
-  const { ref } = req.body || {};
-  const intent = await dbGet('SELECT * FROM payment_intents WHERE ref=?', [ref]);
-  if (!intent) return res.json({ ok: false, msg: 'ไม่พบ ref' });
-  
+// ---------- ADMIN: Payments list ----------
+app.get('/api/admin/payments', requireAdmin, async (_req, res) => {
+  const r = await db.execute(
+    `SELECT * FROM payment_intents ORDER BY created_at DESC LIMIT 200`
+  );
+  res.json(r.rows);
+});
+
+// ---------- ADMIN: User slips ----------
+app.get('/api/admin/users/:id/slips', requireAdmin, async (req, res) => {
+  const id = Number(req.params.id);
+  const r = await db.execute({
+    sql: `SELECT id, ref, amount, status, created_at, expires_at, paid_at,
+                 slip_image_url, slip_qr_payload, detected_name, detected_time,
+                 ocr_text, admin_note, reject_reason
+          FROM payment_intents WHERE user_id=? ORDER BY id DESC`,
+    args: [id],
+  });
+  res.json(r.rows);
+});
+
+// ---------- ADMIN: Approve payment ----------
+app.post('/api/admin/users/:id/approve-payment', requireAdmin, async (req, res) => {
+  const id = Number(req.params.id);
   const now = Date.now();
-  await dbRun(`UPDATE payment_intents SET status=?, paid_at=?, transaction_id=? WHERE ref=?`, ['paid', now, 'ADMIN-' + now, ref]);
+
+  const cur = await db.execute({
+    sql: 'SELECT expires_at, is_admin FROM users WHERE id=?',
+    args: [id],
+  });
+  if (cur.rows.length === 0) return res.status(404).json({ error: 'ไม่พบผู้ใช้' });
+  if (Number(cur.rows[0].is_admin) === 1)
+    return res.status(400).json({ error: 'แก้แอดมินไม่ได้' });
+
+  const base = Math.max(now, Number(cur.rows[0].expires_at) || 0);
+  const newExp = base + SESSION_HOURS * 3600 * 1000;
+
+  await db.execute({
+    sql: `UPDATE users SET payment_status='paid', expires_at=? WHERE id=?`,
+    args: [newExp, id],
+  });
+  await db.execute({
+    sql: `UPDATE payment_intents SET status='paid', paid_at=?
+          WHERE user_id=? AND status='pending'`,
+    args: [now, id],
+  });
+  await db.execute({
+    sql: 'UPDATE sessions SET expires_at=? WHERE user_id=?',
+    args: [newExp, id],
+  });
+
+  res.json({ ok: true, expires_at: newExp });
+});
+
+// ---------- ADMIN: Extend ----------
+app.post('/api/admin/users/:id/extend', requireAdmin, async (req, res) => {
+  const { hours } = req.body || {};
+  const id = Number(req.params.id);
+  if (!Number.isFinite(hours) || hours === 0 || Math.abs(hours) > 100000)
+    return res.status(400).json({ error: 'hours ไม่ถูกต้อง' });
+
+  const r = await db.execute({
+    sql: 'SELECT expires_at, is_admin FROM users WHERE id=?',
+    args: [id],
+  });
+  if (r.rows.length === 0) return res.status(404).json({ error: 'ไม่พบผู้ใช้' });
+  if (Number(r.rows[0].is_admin) === 1)
+    return res.status(400).json({ error: 'แก้แอดมินไม่ได้' });
+
+  const base = Math.max(Date.now(), Number(r.rows[0].expires_at) || 0);
+  const newExp = Math.max(Date.now(), base + hours * 3600 * 1000);
+
+  await db.execute({ sql: 'UPDATE users SET expires_at=? WHERE id=?', args: [newExp, id] });
+  await db.execute({
+    sql: 'UPDATE sessions SET expires_at=? WHERE user_id=?',
+    args: [newExp, id],
+  });
+  res.json({ ok: true, expires_at: newExp });
+});
+
+// ---------- ADMIN: Set time ----------
+app.post('/api/admin/users/:id/set-time', requireAdmin, async (req, res) => {
+  const { expires_at } = req.body || {};
+  const id = Number(req.params.id);
+  if (!Number.isFinite(expires_at) || expires_at < 0)
+    return res.status(400).json({ error: 'expires_at ไม่ถูกต้อง' });
+
+  const r = await db.execute({
+    sql: 'SELECT is_admin FROM users WHERE id=?',
+    args: [id],
+  });
+  if (r.rows.length === 0) return res.status(404).json({ error: 'ไม่พบผู้ใช้' });
+  if (Number(r.rows[0].is_admin) === 1)
+    return res.status(400).json({ error: 'แก้แอดมินไม่ได้' });
+
+  const isFuture = expires_at > Date.now();
+
+  if (isFuture) {
+    await db.execute({
+      sql: `UPDATE users SET expires_at=?, payment_status='paid' WHERE id=?`,
+      args: [expires_at, id],
+    });
+    await db.execute({
+      sql: `UPDATE payment_intents SET status='paid', paid_at=?
+            WHERE user_id=? AND status IN ('pending','expired')`,
+      args: [Date.now(), id],
+    });
+  } else {
+    await db.execute({
+      sql: `UPDATE users SET expires_at=? WHERE id=?`,
+      args: [expires_at, id],
+    });
+  }
+
+  await db.execute({
+    sql: 'UPDATE sessions SET expires_at=? WHERE user_id=?',
+    args: [expires_at, id],
+  });
+
+  res.json({ ok: true, expires_at });
+});
+
+// ---------- ADMIN: Password reset ----------
+app.post('/api/admin/users/:id/password', requireAdmin, async (req, res) => {
+  const { password } = req.body || {};
+  const id = Number(req.params.id);
+  if (!password || password.length < 4)
+    return res.status(400).json({ error: 'รหัสผ่านต้อง >= 4 ตัวอักษร' });
+
+  const salt = crypto.randomBytes(16).toString('hex');
+  const hash = hashPw(password, salt);
+  await db.execute({
+    sql: 'UPDATE users SET password_hash=?, salt=? WHERE id=? AND is_admin=0',
+    args: [hash, salt, id],
+  });
+  await db.execute({ sql: 'DELETE FROM sessions WHERE user_id=?', args: [id] });
   res.json({ ok: true });
 });
 
-app.get('/api/users', requireAdmin, async (req, res) => {
-  // ดึง last_slip_url มาให้แอดมินด้วย
-  const rows = await dbAll(`SELECT id, username, role, status, paid_at, expires_at, transaction_id, created_at, created_by, last_slip_url FROM users ORDER BY id`);
-  res.json({ ok: true, users: rows });
-});
+// ---------- ADMIN: Delete user ----------
+app.delete('/api/admin/users/:id', requireAdmin, async (req, res) => {
+  const id = Number(req.params.id);
+  const r = await db.execute({ sql: 'SELECT is_admin FROM users WHERE id=?', args: [id] });
+  if (r.rows.length === 0) return res.status(404).json({ error: 'ไม่พบผู้ใช้' });
+  if (Number(r.rows[0].is_admin) === 1)
+    return res.status(400).json({ error: 'ลบแอดมินไม่ได้' });
 
-app.post('/api/users/:username/approve', requireAdmin, async (req, res) => {
-  const u = await dbGet('SELECT * FROM users WHERE username=?', [req.params.username]);
-  if (!u) return res.json({ ok: false, msg: 'ไม่พบผู้ใช้' });
-  const now = Date.now();
-  const baseTime = (u.status === 'paid' && u.expires_at > now) ? u.expires_at : now;
-  await dbRun(`UPDATE users SET status=?, paid_at=?, expires_at=?, transaction_id=? WHERE id=?`, ['paid', now, baseTime + DURATION_MS, 'ADMIN-' + now, u.id]);
-  res.json({ ok: true });
-});
-
-app.delete('/api/users/:username', requireAdmin, async (req, res) => {
-  await dbRun('DELETE FROM users WHERE username=?', [req.params.username]);
+  await db.batch([
+    { sql: 'DELETE FROM sessions WHERE user_id=?', args: [id] },
+    { sql: 'DELETE FROM payment_intents WHERE user_id=?', args: [id] },
+    { sql: 'DELETE FROM users WHERE id=?', args: [id] },
+  ]);
   res.json({ ok: true });
 });
 
 // ============================================================
-// AUTO DELETE UNPAID USERS (10 MINS)
+//  ⭐ AUTO CLEANUP: ลบ User ที่หมดอายุเกิน 7 วัน (ทำงานทุก 1 ชั่วโมง)
+// ============================================================
+async function cleanupExpiredUsers() {
+  try {
+    const cutoff = Date.now() - (CLEANUP_EXPIRED_DAYS * 24 * 60 * 60 * 1000);
+    
+    // หา user ที่หมดอายุ (ทั้ง unpaid และ expired) และไม่ใช่แอดมิน
+    const expiredUsers = await db.execute({
+      sql: `SELECT id, username, expires_at, payment_expires_at 
+            FROM users 
+            WHERE is_admin = 0 
+              AND payment_status IN ('unpaid', 'expired')
+              AND (
+                (expires_at > 0 AND expires_at < ?) 
+                OR 
+                (payment_expires_at IS NOT NULL AND payment_expires_at < ?)
+              )`,
+      args: [cutoff, cutoff],
+    });
+
+    if (expiredUsers.rows.length === 0) return;
+
+    console.log(`🧹 พบ ${expiredUsers.rows.length} user หมดอายุเกิน ${CLEANUP_EXPIRED_DAYS} วัน กำลังลบ...`);
+
+    for (const user of expiredUsers.rows) {
+      // ลบ session
+      await db.execute({ sql: 'DELETE FROM sessions WHERE user_id=?', args: [user.id] });
+      // ลบ payment intents
+      await db.execute({ sql: 'DELETE FROM payment_intents WHERE user_id=?', args: [user.id] });
+      // ลบ user
+      await db.execute({ sql: 'DELETE FROM users WHERE id=?', args: [user.id] });
+      console.log(`   🗑️ ลบ user: ${user.username} (id=${user.id})`);
+    }
+    
+    console.log(`✅ ลบ user หมดอายุเรียบร้อย`);
+  } catch (e) {
+    console.error('❌ cleanupExpiredUsers error:', e);
+  }
+}
+
+// ============================================================
+//  ✅ API 404 — ต้องอยู่ก่อน fallback (สำคัญ!)
+// ============================================================
+app.all('/api/*', (req, res) => {
+  console.log('❌ 404 API:', req.method, req.originalUrl);
+  res.status(404).json({ error: `API not found: ${req.method} ${req.originalUrl}` });
+});
+
+// ============================================================
+//  ✅ SPA fallback — ต้องอยู่ล่างสุดก่อน error handler
+// ============================================================
+app.get('*', (_req, res) => {
+  res.sendFile(path.join(PUBLIC_DIR, 'index.html'));
+});
+
+// ============================================================
+//  ✅ Error handler — ต้องอยู่ล่างสุด
+// ============================================================
+app.use((err, _req, res, _next) => {
+  console.error('💥 Unhandled error:', err);
+  if (res.headersSent) return;
+  res.status(500).json({ error: 'server error: ' + err.message });
+});
+
+// ============================================================
+//  Auto-expire pending payments
 // ============================================================
 setInterval(async () => {
   try {
-    const unpaidUsers = await dbAll(`SELECT * FROM users WHERE role != 'admin' AND status = 'unpaid'`);
-    const now = Date.now();
-    for (const u of unpaidUsers) {
-      const createdAtDate = new Date(u.created_at + 'Z'); 
-      const diffMins = (now - createdAtDate.getTime()) / (1000 * 60);
-      
-      if (diffMins > 10) {
-        console.log(`🗑 ลบบัญชี ${u.username} อัตโนมัติ (ไม่ชำระเงินใน 10 นาที)`);
-        await dbRun('DELETE FROM users WHERE id=?', [u.id]);
-        await dbRun('DELETE FROM payment_intents WHERE username=?', [u.username]);
-      }
-    }
+    await db.execute({
+      sql: `UPDATE payment_intents SET status='expired'
+            WHERE status='pending' AND expires_at < ?`,
+      args: [Date.now()],
+    });
   } catch (e) {
-    console.error("Auto-delete error:", e);
+    console.error('auto-expire error:', e);
   }
-}, 60 * 1000); 
+}, 60 * 1000);
 
 // ============================================================
-// ERROR HANDLER
+//  Start
 // ============================================================
-app.use((err, req, res, next) => {
-  console.error('❌ Server Error:', err.message);
-  res.status(500).json({ ok: false, msg: 'เซิร์ฟเวอร์ขัดข้อง: ' + err.message });
-});
-
-// ============================================================
-// STATIC & START
-// ============================================================
-app.use(express.static(PUBLIC_DIR));
-app.get('*', (req, res) => res.sendFile(path.join(PUBLIC_DIR, 'index.html')));
-
-initDB().then(() => {
-  app.listen(PORT, () => {
-    console.log('');
-    console.log('═══════════════════════════════════════════');
-    console.log(`✅ Server running on port ${PORT}`);
-    console.log(`📁 Static dir: ${PUBLIC_DIR}`);
-    console.log(`🌍 Environment: ${process.env.NODE_ENV || 'development'}`);
-    console.log('═══════════════════════════════════════════');
-    console.log('');
+initDB()
+  .then(() => {
+    app.listen(PORT, () => {
+      console.log('');
+      console.log('═══════════════════════════════════════════');
+      console.log(`🚀 drice-miter → http://localhost:${PORT}`);
+      console.log(`👤 Admin: ${ADMIN_USER}`);
+      console.log(`🧹 ลบ user หมดอายุเกิน ${CLEANUP_EXPIRED_DAYS} วัน (ทุก 1 ชม.)`);
+      console.log('═══════════════════════════════════════════');
+      console.log('');
+      
+      // ⭐ เริ่มระบบลบ user หมดอายุทันทีที่ server เริ่มทำงาน
+      cleanupExpiredUsers();
+      setInterval(cleanupExpiredUsers, CLEANUP_INTERVAL_MS);
+    });
+  })
+  .catch((e) => {
+    console.error('❌ initDB ล้มเหลว:', e);
+    process.exit(1);
   });
-}).catch(err => {
-  console.error('❌ initDB failed:', err);
-  process.exit(1);
-});
