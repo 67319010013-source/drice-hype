@@ -24,8 +24,14 @@ const PAYMENT_TIMEOUT_MS = 10 * 60 * 1000;   // 10 นาที (ถ้าไม
 const ADMIN_DEFAULT_USER = 'admin';
 const ADMIN_DEFAULT_PASS = '0647748563';
 
-const EXPECTED_ACCOUNT_LAST4 = process.env.RECEIVER_ACCOUNT_LAST4 || '';
+// ⭐ ตั้งค่าชื่อผู้รับ (รองรับทั้งไทยและอังกฤษ)
 const EXPECTED_NAME = process.env.RECEIVER_NAME || '';
+const EXPECTED_NAME_EN = process.env.RECEIVER_NAME_EN || '';
+const EXPECTED_ACCOUNT_LAST4 = process.env.RECEIVER_ACCOUNT_LAST4 || '';
+
+// ⭐ ตั้งค่าระยะเวลาลบ user ที่หมดอายุ (7 วัน)
+const CLEANUP_EXPIRED_DAYS = 7;
+const CLEANUP_INTERVAL_MS = 60 * 60 * 1000; // ตรวจสอบทุก 1 ชั่วโมง
 
 // ตั้งค่ารับไฟล์รูปภาพ (เก็บไว้ใน Memory ชั่วคราวก่อนเพื่อรอตรวจสอบ)
 const upload = multer({
@@ -264,9 +270,23 @@ app.post('/api/verify-slip', requireLogin, upload.single('slip'), async (req, re
       return res.json({ ok: false, msg: 'AI ไม่พบยอดเงิน 500 บาทในสลิป' });
     }
 
-    // 2. ตรวจสอบชื่อบัญชีผู้รับ
-    if (EXPECTED_NAME && !cleanText.includes(EXPECTED_NAME.replace(/\s+/g, ''))) {
-      return res.json({ ok: false, msg: 'ชื่อผู้รับเงินในสลิปไม่ตรงกับร้าน' });
+    // ⭐ 2. ตรวจสอบชื่อบัญชีผู้รับ (รองรับทั้งไทยและอังกฤษ - อย่างใดอย่างหนึ่ง)
+    const nameCandidates = [
+      EXPECTED_NAME.replace(/\s+/g, ''),                    // ไทย
+      EXPECTED_NAME_EN.replace(/\s+/g, '').toUpperCase(),   // อังกฤษ
+    ].filter(Boolean); // กรองเอาเฉพาะที่มีค่า
+
+    if (nameCandidates.length > 0) {
+      const cleanTextUpper = cleanText.toUpperCase();
+      const matched = nameCandidates.find(n => {
+        if (/^[A-Z0-9]+$/.test(n)) return cleanTextUpper.includes(n); // ถ้าเป็นอังกฤษให้เทียบแบบ Upper
+        return cleanText.includes(n); // ถ้าเป็นไทยให้เทียบตรงๆ
+      });
+
+      if (!matched) {
+        return res.json({ ok: false, msg: `ชื่อผู้รับเงินในสลิปไม่ตรงกับร้าน (ต้องมี "${EXPECTED_NAME}" หรือ "${EXPECTED_NAME_EN}")` });
+      }
+      console.log("✅ ชื่อผู้รับตรง:", matched);
     }
 
     // 3. ตรวจสอบเลขบัญชี 4 ตัวท้าย
@@ -360,7 +380,7 @@ app.delete('/api/users/:username', requireAdmin, async (req, res) => {
 });
 
 // ============================================================
-// AUTO DELETE UNPAID USERS (10 MINS)
+// ⭐ AUTO DELETE: ลบ User ที่ไม่ชำระเงินใน 10 นาที
 // ============================================================
 setInterval(async () => {
   try {
@@ -382,6 +402,49 @@ setInterval(async () => {
 }, 60 * 1000); 
 
 // ============================================================
+// ⭐ AUTO CLEANUP: ลบ User ที่หมดอายุเกิน 7 วัน (ทำงานทุก 1 ชั่วโมง)
+// ============================================================
+async function cleanupExpiredUsers() {
+  try {
+    const cutoff = Date.now() - (CLEANUP_EXPIRED_DAYS * 24 * 60 * 60 * 1000);
+    
+    // หา user ที่หมดอายุ (ทั้ง unpaid และ expired) และไม่ใช่แอดมิน
+    const expiredUsers = await dbAll(
+      `SELECT id, username, expires_at, paid_at 
+       FROM users 
+       WHERE role != 'admin' 
+         AND status IN ('unpaid', 'expired')
+         AND (
+           (expires_at > 0 AND expires_at < ?) 
+           OR 
+           (status = 'unpaid' AND paid_at IS NULL AND created_at < ?)
+         )`,
+      [cutoff, new Date(cutoff).toISOString()]
+    );
+
+    if (expiredUsers.length === 0) return;
+
+    console.log(`🧹 พบ ${expiredUsers.length} user หมดอายุเกิน ${CLEANUP_EXPIRED_DAYS} วัน กำลังลบ...`);
+
+    for (const user of expiredUsers) {
+      // ลบ payment intents
+      await dbRun('DELETE FROM payment_intents WHERE username=?', [user.username]);
+      // ลบ user
+      await dbRun('DELETE FROM users WHERE id=?', [user.id]);
+      console.log(`   🗑️ ลบ user: ${user.username} (id=${user.id})`);
+    }
+    
+    console.log(`✅ ลบ user หมดอายุเรียบร้อย`);
+  } catch (e) {
+    console.error('❌ cleanupExpiredUsers error:', e);
+  }
+}
+
+// เริ่มต้นระบบลบ user หมดอายุทันทีที่ server เริ่มทำงาน
+cleanupExpiredUsers();
+setInterval(cleanupExpiredUsers, CLEANUP_INTERVAL_MS);
+
+// ============================================================
 // ERROR HANDLER
 // ============================================================
 app.use((err, req, res, next) => {
@@ -401,6 +464,7 @@ initDB().then(() => {
     console.log('═══════════════════════════════════════════');
     console.log(`✅ Server running on port ${PORT}`);
     console.log(`📁 Static dir: ${PUBLIC_DIR}`);
+    console.log(`🧹 ลบ user หมดอายุเกิน ${CLEANUP_EXPIRED_DAYS} วัน (ทุก 1 ชม.)`);
     console.log(`🌍 Environment: ${process.env.NODE_ENV || 'development'}`);
     console.log('═══════════════════════════════════════════');
     console.log('');
