@@ -18,15 +18,14 @@ const PORT = process.env.PORT || 3000;
 // ============================================================
 // CONFIG
 // ============================================================
-const AMOUNT = 500;                          // ราคา 500 บาท (สำหรับการทดสอบ)
+const AMOUNT = 500;                          // ราคา 500 บาท
 const DURATION_MS = 24 * 60 * 60 * 1000;     // 24 ชั่วโมง
 const PAYMENT_TIMEOUT_MS = 10 * 60 * 1000;   // 10 นาที (ถ้าไม่จ่ายลบไอดี)
 const ADMIN_DEFAULT_USER = 'admin';
 const ADMIN_DEFAULT_PASS = '0647748563';
 
 const EXPECTED_ACCOUNT_LAST4 = process.env.RECEIVER_ACCOUNT_LAST4 || '';
-const expectedNameTH = process.env.RECEIVER_NAME ? process.env.RECEIVER_NAME.replace(/\s+/g, '') : '';
-const expectedNameEN = process.env.RECEIVER_NAME_ENG ? process.env.RECEIVER_NAME_ENG.replace(/\s+/g, '').toUpperCase() : '';
+const EXPECTED_NAME = process.env.RECEIVER_NAME || '';
 
 // ตั้งค่ารับไฟล์รูปภาพ (เก็บไว้ใน Memory ชั่วคราวก่อนเพื่อรอตรวจสอบ)
 const upload = multer({
@@ -99,6 +98,7 @@ async function initDB() {
     )
   `);
 
+  // เพิ่มคอลัมน์ใหม่สำหรับเก็บลิงก์รูปสลิป
   try { await dbRun(`ALTER TABLE payment_intents ADD COLUMN slip_trans_ref TEXT`); } catch (e) {}
   try { await dbRun(`ALTER TABLE payment_intents ADD COLUMN slip_image_url TEXT`); } catch (e) {}
   try { await dbRun(`ALTER TABLE users ADD COLUMN last_slip_url TEXT`); } catch (e) {}
@@ -236,6 +236,7 @@ app.post('/api/verify-slip', requireLogin, upload.single('slip'), async (req, re
     // ==========================================
     console.log(`🔍 กำลังค้นหา QR Code ในสลิป...`);
     const image = await Jimp.read(req.file.buffer);
+    // แปลงภาพเพื่อให้ jsQR อ่านได้
     const qrCode = jsQR(new Uint8ClampedArray(image.bitmap.data), image.bitmap.width, image.bitmap.height);
 
     let slipQrPayload = null;
@@ -243,7 +244,7 @@ app.post('/api/verify-slip', requireLogin, upload.single('slip'), async (req, re
       slipQrPayload = qrCode.data;
       console.log("📝 ข้อมูลจาก QR Code:", slipQrPayload);
 
-      // เช็คว่า QR Code นี้เคยถูกใช้ยืนยันไปแล้วหรือยัง
+      // เช็คว่า QR Code นี้เคยถูกใช้ยืนยันไปแล้วหรือยัง (ป้องกันการวนสลิป 100%)
       const usedQR = await dbGet('SELECT id FROM payment_intents WHERE slip_trans_ref=?', [slipQrPayload]);
       if (usedQR) return res.json({ ok: false, msg: '❌ สลิปใบนี้ถูกนำมาใช้ยืนยันไปแล้ว' });
     } else {
@@ -256,24 +257,16 @@ app.post('/api/verify-slip', requireLogin, upload.single('slip'), async (req, re
     // ==========================================
     console.log(`🔍 ตรวจพบ QR กำลังให้ AI อ่านตัวอักษรต่อ...`);
     const { data: { text } } = await Tesseract.recognize(req.file.buffer, 'tha+eng');
-    
-    // ตัดช่องว่างและแปลงเป็นตัวพิมพ์ใหญ่เพื่อใช้ตรวจชื่อภาษาอังกฤษ (แก้ปัญหา textUpper is not defined)
     const cleanText = text.replace(/\s+/g, '');
-    const textUpper = cleanText.toUpperCase();
     
-    // 1. ตรวจสอบยอดเงิน 
+    // 1. ตรวจสอบยอดเงิน (หาคำว่า 500 หรือ 500.00)
     if (!cleanText.includes('500.00') && !cleanText.includes('500')) {
-      return res.json({ ok: false, msg: 'AI ไม่พบยอดเงิน 1 บาทในสลิป' });
+      return res.json({ ok: false, msg: 'AI ไม่พบยอดเงิน 500 บาทในสลิป' });
     }
 
     // 2. ตรวจสอบชื่อบัญชีผู้รับ
-    if (expectedNameTH || expectedNameEN) {
-      const foundTH = expectedNameTH && cleanText.includes(expectedNameTH);
-      const foundEN = expectedNameEN && textUpper.includes(expectedNameEN);
-      
-      if (!foundTH && !foundEN) {
-        return res.json({ ok: false, msg: 'ชื่อผู้รับเงินในสลิปไม่ตรงกับร้าน (ไม่พบชื่อไทยหรืออังกฤษ)' });
-      }
+    if (EXPECTED_NAME && !cleanText.includes(EXPECTED_NAME.replace(/\s+/g, ''))) {
+      return res.json({ ok: false, msg: 'ชื่อผู้รับเงินในสลิปไม่ตรงกับร้าน' });
     }
 
     // 3. ตรวจสอบเลขบัญชี 4 ตัวท้าย
@@ -281,7 +274,7 @@ app.post('/api/verify-slip', requireLogin, upload.single('slip'), async (req, re
       return res.json({ ok: false, msg: 'เลขบัญชีผู้รับ 4 ตัวท้ายไม่ตรงกัน' });
     }
 
-    // 4. ตรวจสอบเวลา (ไม่เกิน 10 นาที) - เปิดการทำงานกลับมาให้
+    // 4. ตรวจสอบเวลา (ไม่เกิน 10 นาที)
     const timeMatch = cleanText.match(/(\d{2}):(\d{2})/);
     if (timeMatch) {
        const slipHour = parseInt(timeMatch[1], 10);
@@ -314,6 +307,7 @@ app.post('/api/verify-slip', requireLogin, upload.single('slip'), async (req, re
     // ผ่านเงื่อนไขทั้งหมด อนุมัติทันที!
     const nowStamp = Date.now();
     await dbRun(
+      // บันทึก slipQrPayload ลงในคอลัมน์ slip_trans_ref เพื่อใช้เช็คสลิปซ้ำในอนาคต
       `UPDATE payment_intents SET status=?, paid_at=?, transaction_id=?, slip_trans_ref=?, slip_image_url=? WHERE ref=?`,
       ['paid', nowStamp, 'QR-VERIFIED-' + nowStamp, slipQrPayload, slipUrl, intent.ref]
     );
@@ -346,6 +340,7 @@ app.post('/api/admin/verify-payment', requireAdmin, async (req, res) => {
 });
 
 app.get('/api/users', requireAdmin, async (req, res) => {
+  // ดึง last_slip_url มาให้แอดมินด้วย
   const rows = await dbAll(`SELECT id, username, role, status, paid_at, expires_at, transaction_id, created_at, created_by, last_slip_url FROM users ORDER BY id`);
   res.json({ ok: true, users: rows });
 });
